@@ -62,9 +62,8 @@ struct Cfg {
 impl Cfg {
     fn from_env() -> Self {
         let api_key = env::var("OPENROUTER_API_KEY")
-            .or_else(|_| env::var("ANTHROPIC_API_KEY"))
             .unwrap_or_else(|_| {
-                eprintln!("Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY");
+                eprintln!("Set OPENROUTER_API_KEY");
                 std::process::exit(1);
             });
         Self {

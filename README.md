@@ -6,20 +6,20 @@ The agent reads its own source code, asks an LLM to improve it, executes the pro
 
 ## How it works
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      agent_loop                         │
-│                                                         │
-│  for each iteration:                                    │
-│    1. read src/main.rs                                  │
-│    2. score it  (1000/lines + compile_bonus)            │
-│    3. send source + score to LLM                        │
-│    4. LLM replies with a <tool> call                    │
-│       ├── <tool name="shell">...</tool>   → run shell   │
-│       └── <tool name="write_self">...</tool> → overwrite│
-│    5. feed tool result back to LLM (multi-turn)         │
-│    6. rescore, persist to .evo/history.json             │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A[read src/main.rs] --> B[score: 1000/lines + compile_bonus]
+    B --> C[send source + score to LLM]
+    C --> D{LLM tool call}
+    D -->|shell| E[run shell command]
+    D -->|write_self| F[backup → write → cargo build]
+    F -->|build fails| G[restore backup\nreport error to LLM]
+    G --> C
+    F -->|build passes| H[keep new file]
+    E --> I[feed result back to LLM]
+    H --> I
+    I --> J[rescore + persist to .evo/history.json]
+    J --> A
 ```
 
 ### Scoring
@@ -59,7 +59,7 @@ source ~/.cargo/env
 
 ### 2. Configure API key
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (loaded automatically on startup — no `export` needed):
 
 ```env
 # OpenRouter (recommended — supports many models)
@@ -76,18 +76,10 @@ Or export directly:
 export OPENROUTER_API_KEY=sk-or-...
 ```
 
-You can also use Anthropic directly:
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export INFERENCE_BASE_URL=https://api.anthropic.com/v1
-export MODEL_NAME=claude-opus-4-5
-```
-
 Or any OpenAI-compatible endpoint (Ollama, vLLM, Together, etc.):
 
 ```bash
-export OPENROUTER_API_KEY=anything   # or ANTHROPIC_API_KEY
+export OPENROUTER_API_KEY=anything
 export INFERENCE_BASE_URL=http://localhost:11434/v1
 export MODEL_NAME=llama3
 ```
@@ -117,8 +109,7 @@ cargo build --release
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENROUTER_API_KEY` | — | OpenRouter key (checked first) |
-| `ANTHROPIC_API_KEY` | — | Anthropic key (fallback) |
+| `OPENROUTER_API_KEY` | — | OpenRouter key (required) |
 | `INFERENCE_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compat base URL |
 | `MODEL_NAME` | `anthropic/claude-opus-4` | Model identifier |
 

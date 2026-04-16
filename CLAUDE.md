@@ -57,8 +57,7 @@ Loaded from `.env` at startup (no external crate), then from the process environ
 
 | Variable | Default | Notes |
 |---|---|---|
-| `OPENROUTER_API_KEY` | required | Checked before `ANTHROPIC_API_KEY` |
-| `ANTHROPIC_API_KEY` | required | Fallback if OpenRouter key absent |
+| `OPENROUTER_API_KEY` | required | API key |
 | `INFERENCE_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint |
 | `MODEL_NAME` | `anthropic/claude-opus-4` | Model to use |
 
