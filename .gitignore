@@ -1,5 +1,8 @@
 .omc
 .env
 .evo
+.claude
+
 target/
+outputs/
 *.local.*
