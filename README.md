@@ -2,6 +2,8 @@
 
 A self-evolving coding agent in Rust — the smallest possible implementation that actually works.
 
+<img width="1200" height="800" alt="AutoResearch" src="https://github.com/user-attachments/assets/805635cc-88d4-4f26-9467-07ef8ca99b7b" />
+
 The agent reads its own source code, asks an LLM to improve it, executes the proposed changes, scores the result, and repeats. Over time it tries to make itself shorter, more correct, and more capable.
 
 ## How it works
