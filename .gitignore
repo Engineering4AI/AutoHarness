@@ -2,3 +2,4 @@
 .env
 .evo
 target/
+*.local.*

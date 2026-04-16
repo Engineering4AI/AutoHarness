@@ -1,4 +1,4 @@
-# CLAUDE.md — auto-harness
+# CLAUDE.md — AutoHarness
 
 ## Project overview
 

@@ -1,4 +1,4 @@
-# auto-harness
+# AutoHarness
 
 A self-evolving coding agent in Rust — the smallest possible implementation that actually works.
 
