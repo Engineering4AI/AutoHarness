@@ -116,9 +116,16 @@ fn run_tool(text: &str) -> Option<(String, String)> {
             Some(("shell".to_string(), format!("exit={code}\n{out}")))
         }
         "write_self" => {
+            // Strip markdown fences if the LLM wrapped the code
+            let code = {
+                let s = content.trim();
+                let s = s.strip_prefix("```rust").or_else(|| s.strip_prefix("```")).unwrap_or(s);
+                let s = s.strip_suffix("```").unwrap_or(s);
+                s.trim()
+            };
             // Safety: backup → write → build-verify → restore on failure
             let backup = fs::read_to_string(SELF_PATH).unwrap_or_default();
-            fs::write(SELF_PATH, content).ok()?;
+            fs::write(SELF_PATH, code).ok()?;
             match build() {
                 Ok(_) => {
                     // Keep a .bak of the last known-good version
@@ -168,6 +175,7 @@ const SYSTEM: &str = concat!(
     "Rules:\n",
     "- write_self auto-verifies the build; on failure the old file is restored and you get the error.\n",
     "- Always emit the COMPLETE file in write_self — never truncate.\n",
+    "- In write_self, emit RAW Rust source only — NO ```rust fences, NO markdown.\n",
     "- After each action emit a SUMMARY: line.\n",
     "- Prefer write_self over shell when you have a ready improvement."
 );

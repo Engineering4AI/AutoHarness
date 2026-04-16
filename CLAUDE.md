@@ -1,4 +1,4 @@
-# CLAUDE.md — evo-agent
+# CLAUDE.md — auto-harness
 
 ## Project overview
 
@@ -8,8 +8,8 @@ Single-binary self-evolving Rust agent. The agent reads its own `src/main.rs`, s
 
 ```bash
 cargo build --release
-./target/release/evo-agent          # run agent loop
-./target/release/evo-agent eval     # print score and exit
+./target/release/auto-harness          # run agent loop
+./target/release/auto-harness eval     # print score and exit
 ```
 
 ## Key constants (src/main.rs)
@@ -84,7 +84,7 @@ rm -f .evo/history.json
 
 ### Check current score without running the agent
 ```bash
-./target/release/evo-agent eval
+./target/release/auto-harness eval
 ```
 
 ### Use a local model (Ollama)
@@ -96,5 +96,5 @@ MODEL_NAME=llama3
 
 ### Watch a run
 ```bash
-cargo build --release && ./target/release/evo-agent 2>&1 | tee run.log
+cargo build --release && ./target/release/auto-harness 2>&1 | tee run.log
 ```

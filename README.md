@@ -1,4 +1,4 @@
-# evo-agent
+# auto-harness
 
 A self-evolving coding agent in Rust — the smallest possible implementation that actually works.
 
@@ -96,8 +96,8 @@ export MODEL_NAME=llama3
 
 ```bash
 cargo build --release
-./target/release/evo-agent          # run the agent loop (10 iterations)
-./target/release/evo-agent eval     # print current score and exit
+./target/release/auto-harness          # run the agent loop (10 iterations)
+./target/release/auto-harness eval     # print current score and exit
 ```
 
 ## File layout
