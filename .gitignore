@@ -1,5 +1,4 @@
 .omc
 .env
-
+.evo
 target/
-history.json

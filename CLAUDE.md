@@ -39,6 +39,18 @@ LLM emits plain-text tags, parsed by `run_tool()`:
 
 Only one tool per LLM turn. Results are fed back as `<tool_result>...</tool_result>` user messages. Up to 8 turns per iteration.
 
+### write_self safety (atomic write-and-verify)
+
+`write_self` never leaves a broken file on disk:
+
+1. Back up current `src/main.rs` to `src/main.rs.bak`
+2. Write the new content
+3. Run `cargo build --release`
+4. If build fails → restore backup, report compiler error to LLM so it can retry
+5. If build passes → keep new file, update `.bak`
+
+The LLM sees the full compiler error and can self-correct without human intervention.
+
 ## Environment variables
 
 Loaded from `.env` at startup (no external crate), then from the process environment.
@@ -61,6 +73,7 @@ OpenAI-compatible `/chat/completions` with `Bearer` auth. Works with OpenRouter,
 - **The agent rewrites its own source** — any change you make will be in scope for the agent to further modify.
 - **Test compile before any structural change**: `cargo build --release`
 - **History is append-only**: `.evo/history.json` grows each run. Delete it to reset the iteration counter.
+- **System prompt uses `concat!`** not raw strings — avoids `r###"..."###` delimiter collisions when the LLM rewrites the file containing the prompt.
 
 ## Common tasks
 

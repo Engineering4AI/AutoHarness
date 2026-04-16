@@ -40,7 +40,9 @@ The LLM emits plain-text XML-like tags — no framework, no function-calling sch
 <tool name="write_self">...full new src/main.rs...</tool>
 ```
 
-The agent parses these with string search, executes the action, and feeds the result back as the next user message. The LLM must always compile-check before rewriting.
+The agent parses these with string search and feeds the result back as the next user message.
+
+`write_self` is atomic: the agent backs up the current file, writes the new code, runs `cargo build --release`, and automatically restores the backup if the build fails — reporting the compiler error back to the LLM so it can self-correct.
 
 ### History
 
@@ -104,7 +106,8 @@ cargo build --release
 .
 ├── Cargo.toml              # ureq + serde + serde_json
 ├── src/
-│   └── main.rs             # the entire agent (~260 lines)
+│   ├── main.rs             # the entire agent (~200 lines)
+│   └── main.rs.bak         # last known-good version (auto-created)
 ├── .env                    # API keys (not committed)
 └── .evo/
     └── history.json        # iteration scores (auto-created)
@@ -124,14 +127,15 @@ cargo build --release
 ## What happens on each run
 
 ```
-[evo-agent] starting iteration 1 / 10
-[iter 1] I'll first check the current build status...
-  → shell: exit=0
-    Compiling evo-agent v0.1.0
-[iter 1] Now I'll refactor the tool parser to save 8 lines...
-  → write_self: written
-[evo] iter=1 score 3.843->4.102
-[evo-agent] done. 1 iterations total.
+[evo] starting at iteration 1 / 10
+[iter 1] I'll refactor the tool parser to reduce line count.
+<tool name="write_self">...</tool>
+  -> write_self: written and verified OK
+[evo] iter=1 score 4.846->5.102
+[evo] done. 1 total iterations.
 ```
 
-If the score drops after a rewrite, the agent warns you — you can manually `git checkout src/main.rs` to revert.
+If the score drops after a rewrite, the agent warns you — revert with:
+```bash
+cp src/main.rs.bak src/main.rs
+```
