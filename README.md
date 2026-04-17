@@ -21,15 +21,23 @@ flowchart TD
     C4 --> C1
 
     D --> D1[reflect on unprocessed trajs]
-    D1 --> D2[evolution loop]
+    D1 --> D2[evolution loop\nup to MAX_ITERS]
     D2 --> D3{LLM reply}
     D3 -->|SKIP| D5[exit loop]
     D3 -->|write_self| D4[backup → write → cargo build]
-    D4 -->|fail| D6[restore + report error]
+    D4 -->|fail| D6[restore + report error to LLM]
     D6 --> D2
-    D4 -->|pass| D2
-    D2 --> D5
-    D5 --> D7[update CLAUDE.md + README.md]
+    D4 -->|pass| D8{improved?}
+    D3 -->|write_file| D9[write prompts / AGENTS.md]
+    D9 --> D8
+    D8 -->|yes: reset streak| D2
+    D8 -->|no: streak++| D10{streak ≥ PATIENCE?}
+    D10 -->|no| D2
+    D10 -->|yes| D5
+    D5 --> D7[doc update: CLAUDE.md + README.md]
+    D7 --> D11[cargo clippy -D warnings]
+    D11 --> D12[cargo test --release]
+    D12 --> D13[log lint_result + test_result to traj]
 ```
 
 ### Chat mode
@@ -43,6 +51,7 @@ The LLM automatically groups your messages into tasks — if a new message start
 1. **Reflect** — reads chat session trajs newer than the last watermark, asks the LLM for one concrete improvement suggestion, logs it.
 2. **Evolve** — up to `MAX_ITERS` iterations. Each iteration: show LLM current `src/main.rs` and `src/AGENTS.md` → propose one change → verify with `cargo build`. Stops on `SKIP` or `PATIENCE` consecutive non-improving iters.
 3. **Doc update** — after the loop, the LLM rewrites `CLAUDE.md` and `README.md` to match the current implementation.
+4. **Lint + test** — `cargo clippy -- -D warnings` then `cargo test --release`; results logged to traj; failures print a WARNING to stderr.
 
 ### What the agent can evolve
 
