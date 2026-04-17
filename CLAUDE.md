@@ -1,8 +1,15 @@
 # CLAUDE.md — AutoHarness
 
+## Hard constraints (read first)
+- **Do not add dependencies.** Current deps: `ureq`, `serde`, `serde_json` only.
+- **Keep `src/main.rs` as the single source file.** No modules, no lib.rs.
+- **Test compile before any structural change**: `cargo build --release`
+- **System prompts are external files** in `src/prompts/` — loaded at runtime via `load_prompt()`. Do not inline them back into source.
+- **The agent rewrites its own source** — any change you make is in scope for the agent to further modify.
+
 ## Project overview
 
-Single-binary Rust agent with two modes: an interactive CLI that logs everything to `.evo/`, and a self-evolution mode that reflects on past trajectories and rewrites its own source. The LLM is the judge — no numeric scoring.
+Single-binary Rust agent with two modes: an interactive CLI that logs everything to `.evo/`, and a self-evolution mode that reflects on past trajectories and rewrites its own source and prompts. The LLM is the judge — no numeric scoring.
 
 ## Build & run
 
@@ -18,26 +25,36 @@ cargo build --release
 |---|---|---|
 | `SELF_PATH` | `src/main.rs` | File the agent reads and rewrites |
 | `MAX_ITERS` | `10` | Max evolution iterations per `evolve` run |
-| `PATIENCE` | `3` | Stop early if no `write_self` succeeds for N consecutive iters |
+| `PATIENCE` | `3` | Stop early if no improvement for N consecutive iters |
 | `WATERMARK_PATH` | `.evo/learned_until.txt` | Timestamp of last reflected session |
 
 ## Two modes
 
 ### `auto-harness` (default) — interactive chat
 
-Starts an interactive REPL with an async input queue (background stdin thread → `VecDeque`). LLM replies are printed; all other events go to traj only. Runs until Ctrl+C or EOF.
+Interactive REPL with async stdin queue (background thread → `VecDeque`). LLM replies are printed; all events go to traj. Runs until Ctrl+C or EOF.
 
-Task grouping: when a new message arrives, the LLM judges whether it continues the current task or starts a new one (`NEW` / `CONTINUE`). Each task gets its own output directory `outputs/<ts>/task_N`. Traj and outputs share the same session timestamp.
+Task grouping: the LLM judges each new message as `NEW` or `CONTINUE`. Each task gets its own output directory `outputs/<ts>/task_N`.
 
 ### `auto-harness evolve` — reflection + code evolution
 
-1. **Reflect**: reads all session trajs newer than the watermark. Sends up to 300 lines to the LLM asking for one concrete improvement suggestion. Logs the result; advances the watermark.
-2. **Evolve**: runs up to `MAX_ITERS` iterations. Each iteration shows the LLM the current `src/main.rs` and asks for one improvement. The LLM may call `write_self`, `shell`, or reply `SKIP` to exit immediately. Stops early on `SKIP` or after `PATIENCE` consecutive non-improving iterations.
-3. **Doc update**: after the loop, asks the LLM to update `CLAUDE.md` and `README.md` via `write_file` tool calls to reflect the current implementation.
+1. **Reflect**: reads session trajs newer than the watermark → asks LLM for one concrete improvement suggestion → advances watermark.
+2. **Evolve**: up to `MAX_ITERS` iterations. Each iter shows the LLM `src/main.rs` + `src/AGENTS.md` → LLM proposes one change via `write_self` or `write_file` → verified. Stops on `SKIP` or `PATIENCE` consecutive non-improving iters.
+3. **Doc update**: after the loop, LLM rewrites `CLAUDE.md` and `README.md` via `write_file`.
+
+## Evolvable artifacts
+
+| Artifact | How evolved |
+|---|---|
+| `src/main.rs` | `write_self` tool (atomic: backup → write → `cargo build` → restore on failure) |
+| `src/AGENTS.md` | `write_file` tool |
+| `src/prompts/*.txt` | `write_file` tool |
+| `CLAUDE.md` | `write_file` tool (doc update step) |
+| `README.md` | `write_file` tool (doc update step) |
 
 ## Tool protocol
 
-LLM emits plain-text tags, parsed by `run_tool()`:
+LLM emits plain-text tags parsed by `run_tool()`:
 
 ```
 <tool name="shell">command here</tool>
@@ -46,45 +63,63 @@ LLM emits plain-text tags, parsed by `run_tool()`:
 ...full file content...</tool>
 ```
 
-Only one tool per LLM turn. Results are fed back as `<tool_result>...</tool_result>` user messages. Up to 8 turns per iteration.
+One tool per LLM turn. Results fed back as `<tool_result>...</tool_result>`. Up to 8 turns per iteration.
 
 ### write_self safety (atomic write-and-verify)
 
-`write_self` never leaves a broken file on disk:
+1. Reject if content is empty
+2. Back up `src/main.rs` to `src/main.<ts>.rs.bak`
+3. Write new content
+4. `cargo build --release`
+5. Fail → restore backup, report compiler error to LLM for retry
+6. Pass → keep new file
 
-1. Reject immediately if content is empty
-2. Back up current `src/main.rs` to `src/main.rs.bak` (evolve mode only)
-3. Write the new content
-4. Run `cargo build --release`
-5. If build fails → restore backup, report compiler error to LLM so it can retry
-6. If build passes → keep new file
+## Progressive disclosure
+
+| Call site | Limit | Mechanism |
+|---|---|---|
+| Reflection traj | 8 000 chars | Strip `content`/`preview` fields; cap strings at 120 chars; take last N lines |
+| Task-grouping judge | 6 messages | Sliding window |
+| Chat history | 20 messages | `drain(..len-20)` after each push |
+| Shell output | 2 000 chars | `.chars().take(2000)` |
+| Build error | 400 chars | Substring on compiler stderr |
+| Evolve iter | full `src/main.rs` + `src/AGENTS.md` | LLM must see whole files to propose a change |
+| Doc update | full `src/main.rs` + `CLAUDE.md` + `README.md` | One-shot, acceptable |
 
 ## Trajectory logging
 
-Every run creates `.evo/sessions/<unix_timestamp>/traj.jsonl`. Each line is a JSON event:
+Every run creates `.evo/sessions/<unix_timestamp>/traj.jsonl`:
 
 ```json
-{"ts": 1713300000, "kind": "session_start",    "data": {}}
-{"ts": 1713300001, "kind": "user_input",        "data": "fix the bug in shell()"}
-{"ts": 1713300005, "kind": "llm_response",      "data": {"task": 1, "turn": 1, "content": "..."}}
-{"ts": 1713300008, "kind": "task_boundary",     "data": {"task": 2}}
-{"ts": 1713300010, "kind": "tool_result",       "data": {"tool": "write_self", "result": "written and verified OK"}}
-{"ts": 1713300011, "kind": "session_end",       "data": {"turns": 4}}
-{"ts": 1713300020, "kind": "iter_start",        "data": {"iter": 1}}
-{"ts": 1713300025, "kind": "iter_end",          "data": {"iter": 1, "improved": true}}
-{"ts": 1713300026, "kind": "iter_skip",         "data": {"iter": 2, "reason": "LLM chose not to evolve"}}
-{"ts": 1713300027, "kind": "evolve_end",        "data": {}}
+{"ts": 1713300000, "kind": "session_start",  "data": {}}
+{"ts": 1713300001, "kind": "user_input",      "data": "fix the bug"}
+{"ts": 1713300005, "kind": "llm_response",    "data": {"task": 1, "turn": 1, "preview": "..."}}
+{"ts": 1713300008, "kind": "task_boundary",   "data": {"task": 2}}
+{"ts": 1713300010, "kind": "tool_result",     "data": {"tool": "write_self", "result": "written and verified OK"}}
+{"ts": 1713300011, "kind": "session_end",     "data": {"turns": 4}}
+{"ts": 1713300020, "kind": "iter_start",      "data": {"iter": 1}}
+{"ts": 1713300025, "kind": "iter_end",        "data": {"iter": 1, "improved": true}}
+{"ts": 1713300026, "kind": "iter_skip",       "data": {"iter": 2, "reason": "LLM chose not to evolve"}}
+{"ts": 1713300027, "kind": "evolve_end",      "data": {}}
 ```
 
 ## Output layout
 
 ```
 .evo/
-  sessions/<ts>/traj.jsonl      # event log for the session
-  learned_until.txt             # watermark for reflection
+  sessions/<ts>/traj.jsonl      # event log
+  learned_until.txt             # reflection watermark
 outputs/<ts>/
-  task_1/                       # artifacts for task 1 (same ts as traj)
+  task_1/                       # artifacts for task 1
   task_2/                       # artifacts for task 2
+src/
+  main.rs                       # agent source (self-rewriting)
+  AGENTS.md                     # agent orchestration guide (self-evolving)
+  prompts/
+    chat_system.txt             # chat mode system prompt
+    reflect_system.txt          # reflection system prompt
+    evolve_system.txt           # evolution system prompt
+    doc_system.txt              # doc update system prompt
 ```
 
 ## Environment variables
@@ -95,50 +130,18 @@ outputs/<ts>/
 | `INFERENCE_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint |
 | `MODEL_NAME` | `anthropic/claude-opus-4` | Model to use |
 
-## Progressive disclosure
-
-Every LLM call site sends only as much context as needed — no unbounded inputs:
-
-| Call site | Limit | Mechanism |
-|---|---|---|
-| Reflection traj | 8 000 chars | Strip `content`/`preview` fields; cap strings at 120 chars; take last N lines |
-| Task-grouping judge | 6 messages | Sliding window of last 6 messages from history |
-| Chat history | 20 messages | `drain(..len-20)` after each push |
-| Shell output | 2 000 chars | `.chars().take(2000)` |
-| Build error | 400 chars | Substring on compiler stderr |
-| Evolve iter | full `src/main.rs` | Necessary — LLM must see the whole file to propose a change |
-| Doc update | full 3 files | One-shot, acceptable |
-
-## Important rules for editing this codebase
-
-- **Do not add dependencies** without a strong reason. Current deps: `ureq`, `serde`, `serde_json` only.
-- **Keep `src/main.rs` as the single source file.** No modules, no lib.rs.
-- **The agent rewrites its own source** — any change you make will be in scope for the agent to further modify.
-- **Test compile before any structural change**: `cargo build --release`
-- **System prompt uses `concat!`** not raw strings — avoids `r###"..."###` delimiter collisions when the LLM rewrites the file containing the prompt.
-
 ## Common tasks
 
-### Reset trajectories
 ```bash
+# Reset trajectories
 rm -rf .evo/ outputs/
-```
 
-### Re-run reflection on already-processed sessions
-```bash
-rm .evo/learned_until.txt
-./target/release/auto-harness evolve
-```
+# Re-run reflection on already-processed sessions
+rm .evo/learned_until.txt && ./target/release/auto-harness evolve
 
-### Inspect session trajectories
-```bash
-ls .evo/sessions/
+# Inspect trajectories
 cat .evo/sessions/<ts>/traj.jsonl | jq .
-```
 
-### Use a local model (Ollama)
-```env
-OPENROUTER_API_KEY=unused
-INFERENCE_BASE_URL=http://localhost:11434/v1
-MODEL_NAME=llama3
+# Use a local model (Ollama)
+OPENROUTER_API_KEY=unused INFERENCE_BASE_URL=http://localhost:11434/v1 MODEL_NAME=llama3 ./target/release/auto-harness
 ```

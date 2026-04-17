@@ -41,8 +41,21 @@ The LLM automatically groups your messages into tasks — if a new message start
 ### Evolve mode
 
 1. **Reflect** — reads chat session trajs newer than the last watermark, asks the LLM for one concrete improvement suggestion, logs it.
-2. **Evolve** — up to `MAX_ITERS` iterations. Each iteration: show LLM current `src/main.rs` → propose one change → verify with `cargo build`. The LLM can reply `SKIP` to exit immediately if nothing is worth changing.
+2. **Evolve** — up to `MAX_ITERS` iterations. Each iteration: show LLM current `src/main.rs` and `src/AGENTS.md` → propose one change → verify with `cargo build`. Stops on `SKIP` or `PATIENCE` consecutive non-improving iters.
 3. **Doc update** — after the loop, the LLM rewrites `CLAUDE.md` and `README.md` to match the current implementation.
+
+### What the agent can evolve
+
+Beyond just its own source code, the agent can improve all of these via `write_file`:
+
+| Artifact | Purpose |
+|---|---|
+| `src/main.rs` | Core agent logic (atomic rewrite with build verification) |
+| `src/AGENTS.md` | Agent orchestration best practices guide |
+| `src/prompts/chat_system.txt` | Chat mode persona and rules |
+| `src/prompts/reflect_system.txt` | Trajectory analysis instructions |
+| `src/prompts/evolve_system.txt` | Evolution loop instructions |
+| `src/prompts/doc_system.txt` | Doc update instructions |
 
 ### Tool dispatch
 
@@ -55,7 +68,7 @@ The LLM emits plain-text XML-like tags — no framework, no function-calling sch
 ...full content...</tool>
 ```
 
-`write_self` is atomic: backup → write → `cargo build --release` → restore on failure, reporting the compiler error back to the LLM so it can self-correct.
+`write_self` is atomic: backup → write → `cargo build --release` → restore on failure, reporting the exact compiler error back to the LLM so it can self-correct.
 
 ### Progressive disclosure
 
@@ -101,14 +114,20 @@ export MODEL_NAME=llama3
 .
 ├── Cargo.toml
 ├── src/
-│   └── main.rs             # the entire agent (~450 lines)
-├── .env                    # API keys (not committed)
+│   ├── main.rs               # the entire agent (~420 lines)
+│   ├── AGENTS.md             # agent orchestration guide (self-evolving)
+│   └── prompts/
+│       ├── chat_system.txt   # chat mode system prompt
+│       ├── reflect_system.txt
+│       ├── evolve_system.txt
+│       └── doc_system.txt
+├── .env                      # API keys (not committed)
 ├── .evo/
-│   ├── sessions/<ts>/      # one dir per run, contains traj.jsonl
-│   └── learned_until.txt   # reflection watermark
+│   ├── sessions/<ts>/        # one dir per run, contains traj.jsonl
+│   └── learned_until.txt     # reflection watermark
 └── outputs/<ts>/
-    ├── task_1/             # artifacts for task 1
-    └── task_2/             # artifacts for task 2 (if new task detected)
+    ├── task_1/               # artifacts for task 1
+    └── task_2/               # artifacts for task 2 (if new task detected)
 ```
 
 ## Configuration

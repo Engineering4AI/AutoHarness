@@ -70,6 +70,10 @@ fn llm(cfg: &Cfg, messages: &[Msg], system: &str) -> Result<String, String> {
         .ok_or_else(|| format!("bad response: {v}"))
 }
 
+fn load_prompt(name: &str) -> String {
+    fs::read_to_string(format!("src/prompts/{name}")).unwrap_or_default()
+}
+
 fn is_new_task(cfg: &Cfg, history: &[Msg], next_input: &str) -> bool {
     let system = "You decide if a new user message starts a NEW task or continues the current one. Reply with exactly one word: NEW or CONTINUE.";
     let window: Vec<Msg> = history.iter().rev().take(6).cloned().collect::<Vec<_>>()
@@ -176,13 +180,7 @@ fn chat_mode(cfg: &Cfg, session_ts: &str, traj: &str) {
         }
     });
 
-    let system = concat!(
-        "You are a helpful coding assistant. When you need to run a command use:\n",
-        "<tool name=\"shell\">command</tool>\n",
-        "When you need to write a file use:\n",
-        "<tool name=\"write_file\">path/to/file\ncontent</tool>\n",
-        "Only one tool per reply."
-    );
+    let system = load_prompt("chat_system.txt");
 
     let mut messages: Vec<Msg> = vec![];
     let mut task_n = 1usize;
@@ -216,7 +214,7 @@ fn chat_mode(cfg: &Cfg, session_ts: &str, traj: &str) {
         if messages.len() > 20 { messages.drain(..messages.len() - 20); }
 
         for turn in 1..=8 {
-            let reply = match llm(cfg, &messages, system) {
+            let reply = match llm(cfg, &messages, &system) {
                 Ok(r) => r,
                 Err(e) => { eprintln!("LLM error: {e}"); break; }
             };
@@ -261,11 +259,7 @@ fn reflect(cfg: &Cfg, traj: &str) {
         return;
     }
 
-    let system = concat!(
-        "You are analyzing trajectory logs from an AI coding agent. ",
-        "Identify ONE concrete, actionable improvement to the agent's src/main.rs. ",
-        "Be specific. One sentence."
-    );
+    let system = load_prompt("reflect_system.txt");
 
     for entry in &sessions {
         let session_ts: u64 = entry.file_name().to_string_lossy().parse().unwrap_or(0);
@@ -301,7 +295,7 @@ fn reflect(cfg: &Cfg, traj: &str) {
             role: "user".to_string(),
             content: json!(format!("Session {session_ts} events:\n{sample}\n\nWhat is the single most important improvement?")),
         }];
-        match llm(cfg, &msgs, system) {
+        match llm(cfg, &msgs, &system) {
             Ok(suggestion) => {
                 eprintln!("Reflection [{session_ts}]: {suggestion}");
                 traj_log(traj, "reflect_result", json!(suggestion));
@@ -317,33 +311,27 @@ fn reflect(cfg: &Cfg, traj: &str) {
 fn evolve_mode(cfg: &Cfg, traj: &str) {
     reflect(cfg, traj);
 
-    let evolve_system = concat!(
-        "You are improving a Rust self-evolving agent. You will see the full src/main.rs.\n",
-        "Rules:\n",
-        "- Propose ONE small, clearly beneficial change.\n",
-        "- Only rewrite when the improvement is unambiguously worth the complexity cost.\n",
-        "- Prefer deletion and simplification over addition.\n",
-        "- If nothing is worth changing, reply with exactly: SKIP\n",
-        "Tools available (one per reply):\n",
-        "<tool name=\"write_self\">...full new src/main.rs...</tool>\n",
-        "<tool name=\"shell\">command</tool>\n",
-        "After write_self succeeds, you may verify with shell, then stop."
-    );
+    let evolve_system = load_prompt("evolve_system.txt");
 
     traj_log(traj, "evolve_start", json!({}));
     let mut no_improve_streak = 0usize;
 
+    let agents_path = "src/AGENTS.md";
+
     'outer: for iter in 1..=MAX_ITERS {
         traj_log(traj, "iter_start", json!({"iter": iter}));
         let src = fs::read_to_string(SELF_PATH).unwrap_or_default();
+        let agents_md = fs::read_to_string(agents_path).unwrap_or_default();
         let mut messages: Vec<Msg> = vec![Msg {
             role: "user".to_string(),
-            content: json!(format!("Current src/main.rs:\n```rust\n{src}\n```\n\nPropose one improvement or reply SKIP.")),
+            content: json!(format!(
+                "Current src/main.rs:\n```rust\n{src}\n```\n\nCurrent src/AGENTS.md:\n{agents_md}\n\nPropose one improvement to either file, or reply SKIP."
+            )),
         }];
 
         let mut improved = false;
         for turn in 1..=8 {
-            let reply = match llm(cfg, &messages, evolve_system) {
+            let reply = match llm(cfg, &messages, &evolve_system) {
                 Ok(r) => r,
                 Err(e) => { eprintln!("LLM error: {e}"); break; }
             };
@@ -357,10 +345,10 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
             messages.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
 
             if let Some(tool_result) = run_tool(&reply, traj, true) {
-                let ok = tool_result.contains("verified OK");
-                if ok { improved = true; }
+                let write_ok = tool_result.contains("verified OK") || tool_result.contains("written ");
+                if write_ok { improved = true; }
                 messages.push(Msg { role: "user".to_string(), content: json!(tool_result) });
-                if ok { break; }
+                if write_ok { break; }
             } else {
                 break;
             }
@@ -384,18 +372,13 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
     let src = fs::read_to_string(SELF_PATH).unwrap_or_default();
     let claude_md = fs::read_to_string("CLAUDE.md").unwrap_or_default();
     let readme = fs::read_to_string("README.md").unwrap_or_default();
-    let doc_system = concat!(
-        "You are updating documentation to match the current implementation.\n",
-        "Use write_file tools to update CLAUDE.md and README.md.\n",
-        "<tool name=\"write_file\">path\ncontent</tool>\n",
-        "Reflect the actual current code. Be concise."
-    );
+    let doc_system = load_prompt("doc_system.txt");
     let doc_prompt = format!(
         "Current src/main.rs:\n```rust\n{src}\n```\n\nCurrent CLAUDE.md:\n{claude_md}\n\nCurrent README.md:\n{readme}\n\nUpdate both docs to match the implementation."
     );
     let mut doc_msgs = vec![Msg { role: "user".to_string(), content: json!(doc_prompt) }];
     for _ in 0..4 {
-        match llm(cfg, &doc_msgs, doc_system) {
+        match llm(cfg, &doc_msgs, &doc_system) {
             Ok(reply) => {
                 doc_msgs.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
                 if let Some(result) = run_tool(&reply, traj, false) {
