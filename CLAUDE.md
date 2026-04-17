@@ -95,6 +95,20 @@ outputs/<ts>/
 | `INFERENCE_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint |
 | `MODEL_NAME` | `anthropic/claude-opus-4` | Model to use |
 
+## Progressive disclosure
+
+Every LLM call site sends only as much context as needed — no unbounded inputs:
+
+| Call site | Limit | Mechanism |
+|---|---|---|
+| Reflection traj | 8 000 chars | Strip `content`/`preview` fields; cap strings at 120 chars; take last N lines |
+| Task-grouping judge | 6 messages | Sliding window of last 6 messages from history |
+| Chat history | 20 messages | `drain(..len-20)` after each push |
+| Shell output | 2 000 chars | `.chars().take(2000)` |
+| Build error | 400 chars | Substring on compiler stderr |
+| Evolve iter | full `src/main.rs` | Necessary — LLM must see the whole file to propose a change |
+| Doc update | full 3 files | One-shot, acceptable |
+
 ## Important rules for editing this codebase
 
 - **Do not add dependencies** without a strong reason. Current deps: `ureq`, `serde`, `serde_json` only.

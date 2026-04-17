@@ -57,6 +57,16 @@ The LLM emits plain-text XML-like tags — no framework, no function-calling sch
 
 `write_self` is atomic: backup → write → `cargo build --release` → restore on failure, reporting the compiler error back to the LLM so it can self-correct.
 
+### Progressive disclosure
+
+Every LLM call site is bounded — no unbounded context growth:
+
+- **Reflection**: traj stripped to metadata-only (no content blobs), capped at 8 000 chars
+- **Task judge**: last 6 messages only
+- **Chat history**: sliding window of 20 messages
+- **Shell output**: capped at 2 000 chars
+- **Build errors**: capped at 400 chars
+
 ## Installation
 
 ```bash
