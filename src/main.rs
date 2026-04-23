@@ -377,7 +377,7 @@ fn chat_mode(cfg: &Cfg, session_ts: &str, traj: &str) {
             evolve_mode(cfg, traj);
             // Re-exec the evolved binary with the same arguments
             let exe = env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("./target/release/auto-harness"));
-            eprintln!("Evolution done. Relaunching {}...", exe.display());
+            eprintln!("Evolution done. Relaunching {}...\n", exe.display());
             let err = Command::new(&exe).args(env::args().skip(1)).exec();
             eprintln!("re-exec failed: {err}");
             std::process::exit(1);
@@ -583,12 +583,21 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
     // Final lint + test to verify evolved binary is healthy
     eprintln!("Running post-evolution lint and tests...");
     let clippy = Command::new("cargo")
-        .args(["clippy", "--release", "--", "-D", "warnings"])
+        .args(["clippy", "--release", "--no-deps", "--", "-D", "warnings"])
         .output();
     let (clippy_ok, clippy_out) = match clippy {
         Ok(o) => {
-            let out = String::from_utf8_lossy(&o.stderr).chars().take(2000).collect::<String>();
-            (o.status.success(), out)
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            // filter to only lines that are warnings/errors from our code
+            let relevant: String = combined.lines()
+                .filter(|l| l.contains("warning") || l.contains("error") || l.starts_with("error"))
+                .collect::<Vec<_>>().join("\n");
+            let out = if relevant.is_empty() { combined } else { relevant };
+            (o.status.success(), out.chars().take(2000).collect::<String>())
         }
         Err(e) => (false, e.to_string()),
     };
