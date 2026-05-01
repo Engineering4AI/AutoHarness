@@ -9,7 +9,8 @@ content</tool>
 
 Rules:
 - Reflect only what the code actually does — no aspirational features
-- CLAUDE.md: hard constraints and key constants at the top; 50–200 lines total
+- Keep docs lean: every line must earn its place; cut anything a reader can infer from the code
+- CLAUDE.md: hard constraints and key constants at the top; target ≤150 lines, never exceed 200
 - README.md: quick-start must work from a cold clone; mermaid diagram stays high-level (≤8 nodes)
 - Progressive disclosure table must match the actual limits in src/main.rs
 - Remove any section that describes removed or changed behavior

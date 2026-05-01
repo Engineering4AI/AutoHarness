@@ -307,12 +307,9 @@ fn run_tool(
             }
             if evolve_mode && std::path::Path::new(path).exists() {
                 let ts = now_secs();
-                let bak = if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
-                    let stem = &path[..path.len() - ext.len() - 1];
-                    format!("{stem}.{ts}.{ext}.bak")
-                } else {
-                    format!("{path}.{ts}.bak")
-                };
+                let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
+                let stem = if ext.is_empty() { path } else { &path[..path.len() - ext.len() - 1] };
+                let bak = format!("{stem}.{ts}.{ext}.bak");
                 fs::copy(path, &bak).ok();
             }
             fs::write(path, content).ok();
@@ -346,12 +343,9 @@ fn run_tool(
             }
             if std::path::Path::new(path).exists() {
                 let ts = now_secs();
-                let bak = if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
-                    let stem = &path[..path.len() - ext.len() - 1];
-                    format!("{stem}.{ts}.{ext}.bak")
-                } else {
-                    format!("{path}.{ts}.bak")
-                };
+                let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
+                let stem = if ext.is_empty() { path } else { &path[..path.len() - ext.len() - 1] };
+                let bak = format!("{stem}.{ts}.{ext}.bak");
                 fs::copy(path, &bak).ok();
                 fs::remove_file(path).ok();
                 traj_log(traj, "tool_result", json!({"tool": "delete_file", "path": path}));
@@ -491,8 +485,10 @@ fn reflect(cfg: &Cfg, traj: &str) {
     let sessions: Vec<_> = if let Ok(entries) = fs::read_dir(".evo/sessions") {
         let mut v: Vec<_> = entries.flatten()
             .filter(|e| {
-                e.path().is_dir() &&
-                e.file_name().to_string_lossy().parse::<u64>().map(|ts| ts > watermark).unwrap_or(false)
+                let name = e.file_name();
+                let s = name.to_string_lossy();
+                s.ends_with(".jsonl") &&
+                s.trim_end_matches(".jsonl").parse::<u64>().map(|ts| ts > watermark).unwrap_or(false)
             })
             .collect();
         v.sort_by_key(|e| e.file_name());
@@ -511,8 +507,9 @@ fn reflect(cfg: &Cfg, traj: &str) {
     let system = load_prompt("reflect_system.txt");
 
     for entry in &sessions {
-        let session_ts: u64 = entry.file_name().to_string_lossy().parse().unwrap_or(0);
-        let traj_path = entry.path().join("traj.jsonl");
+        let name = entry.file_name();
+        let session_ts: u64 = name.to_string_lossy().trim_end_matches(".jsonl").parse().unwrap_or(0);
+        let traj_path = entry.path();
         let lines: Vec<String> = fs::read_to_string(&traj_path)
             .unwrap_or_default()
             .lines()
@@ -557,6 +554,7 @@ fn reflect(cfg: &Cfg, traj: &str) {
 }
 
 fn evolve_mode(cfg: &Cfg, traj: &str) {
+    let evolve_ts = now_secs();
     reflect(cfg, traj);
 
     let evolve_system = load_prompt("evolve_system.txt");
@@ -700,13 +698,23 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
             Err(e) => { eprintln!("Doc update LLM error: {e}"); break; }
         }
     }
+
+    // Write evolution memo summarizing what changed this run
+    let traj_content = fs::read_to_string(traj).unwrap_or_default();
+    let memo_system = "You are a concise technical writer. Summarize what changed in this evolution run in a short markdown document. Focus on what was improved and why. Be specific and brief.";
+    let memo_prompt = format!("Evolution trajectory:\n{traj_content}\n\nWrite a brief markdown summary of what changed this evolution run.");
+    let memo_msgs = vec![Msg { role: "user".to_string(), content: json!(memo_prompt) }];
+    if let Ok(memo) = llm(cfg, &memo_msgs, memo_system) {
+        fs::create_dir_all(".evo/memos").ok();
+        fs::write(format!(".evo/memos/{evolve_ts}.md"), &memo).ok();
+        eprintln!("Memo written: .evo/memos/{evolve_ts}.md");
+    }
 }
 
 fn main() {
     let ts = now_secs().to_string();
-    let traj_dir = format!(".evo/sessions/{ts}");
-    fs::create_dir_all(&traj_dir).ok();
-    let traj = format!("{traj_dir}/traj.jsonl");
+    fs::create_dir_all(".evo/sessions").ok();
+    let traj = format!(".evo/sessions/{ts}.jsonl");
     // load .env
     if let Ok(content) = fs::read_to_string(".env") {
         for line in content.lines() {
