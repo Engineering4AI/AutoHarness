@@ -23,7 +23,7 @@ File permissions:
 
 Rules:
 - One tool per reply
-- Prefer deletion and simplification over addition
+- Keep code lean: prefer deletion and simplification over addition; every line must earn its place
 - Do not add dependencies (current: ureq, serde, serde_json)
 - Do not split src/main.rs into modules
 - For src/main.rs changes: the tool call IS the verification — build failure is reported back to you
