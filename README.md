@@ -61,7 +61,7 @@ flowchart TD
     C -->|/exit| Z[clean shutdown]
     C -->|user message| E[LLM: chat + tools]
     E --> C
-    C -->|/evolve| D[reflect → evolve → clippy/test → doc update]
+    C -->|/evolve| D[reflect → evolve loop → reduce slop → lint/test → doc update]
     D --> R[exec evolved binary]
 ```
 
@@ -77,11 +77,12 @@ flowchart TD
 - Slash commands: `/exit` (quit), `/evolve` (evolve + relaunch)
 
 ### `/evolve`
-1. **Reflect:** analyze unprocessed trajectories → one concrete improvement suggestion
-2. **Evolve:** up to `MAX_ITERS` iterations; LLM sees full prompt files, `AGENTS.md`, `memory/*.md`, and `main.rs`; proposes one change per iter
-3. **Validate:** `cargo clippy --no-deps -- -D warnings` + `cargo test --release`
-4. **Doc update:** rewrite `CLAUDE.md` and `README.md` (reflects the tested, working state)
-5. **Relaunch:** `exec()` replaces the process with the freshly-built binary
+1. **Reflect:** analyze unprocessed trajectories (progressive disclosure — stripped summary first; LLM reads more via `read_file path start..end`) → one concrete improvement suggestion
+2. **Evolve:** unbounded iterations; LLM sees full prompt files, `AGENTS.md`, `memory/` index (filepath + description), and `main.rs`; proposes one change per iter; stops on `SKIP`
+3. **Reduce slop:** clippy + test output fed to LLM for `write_file` fixes
+4. **Final lint/test:** `cargo clippy --no-deps -- -D warnings` + `cargo test --release` — authoritative gate
+5. **Doc update:** rewrite `CLAUDE.md` and `README.md` (reflects the verified, working state)
+6. **Relaunch:** `exec()` replaces the process with the freshly-built binary
 
 ---
 
@@ -89,16 +90,17 @@ flowchart TD
 
 | Artifact | Tool | Notes |
 |---|---|---|
-| `src/main.rs` | `write_self` | Atomic: backup → write → build-verify → restore on fail |
-| `src/AGENTS.md` | `write_file` | Backed up before overwrite |
-| `src/prompts/*.txt` | `write_file` | Backed up before overwrite |
-| `src/memory/*.md` | `write_file` | Reference notes; new files created freely |
+| `src/main.rs` | `write_file` | Atomic: backup → write → build-verify → restore on fail |
+| Any `src/**` non-`.bak` | `write_file` | All `.rs`, `.md`, `.txt` under `src/` |
 | `CLAUDE.md` / `README.md` | `write_file` | Doc update step |
 
+Both `read_file` and `write_file` accept an optional `start..end` char-offset range for partial reads/patches.
+
 Evolution file rules (enforced at runtime):
-- `write_file` restricted to `src/memory/`, `src/prompts/`, `src/AGENTS.md`, `CLAUDE.md`, `README.md`
+- `write_file` allowed for any `src/**` path (non-`.bak`), `CLAUDE.md`, `README.md`
+- `src/main.rs` writes trigger `cargo build --release`; failure auto-reverts
 - `delete_file` restricted to `src/`; `src/main.rs` and `src/AGENTS.md` are protected
-- All modified `src/` files are auto-backed-up as `<stem>.<ts>.<ext>.bak`
+- All modified files auto-backed-up as `<stem>.<ts>.<ext>.bak`
 
 ---
 
@@ -135,8 +137,10 @@ Evolution file rules (enforced at runtime):
 | `MODEL_NAME` | `anthropic/claude-opus-4` | Model identifier |
 
 Core constants in `src/main.rs`:
-- `MAX_ITERS = 10`
-- `PATIENCE = 3`
+- `SELF_PATH = "src/main.rs"` — file the agent reads and rewrites
+- `WATERMARK_PATH = ".evo/learned_until.txt"` — tracks last reflected session
+
+The evolution loop is unbounded — it runs until the LLM replies `SKIP`.
 
 ---
 

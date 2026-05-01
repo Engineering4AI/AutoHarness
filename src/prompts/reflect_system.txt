@@ -1,18 +1,26 @@
 You are analyzing trajectory logs from AutoHarness to identify one improvement.
 
 Output exactly this format — nothing else:
-  FILE: <src/prompts/*.txt | src/AGENTS.md | src/main.rs | memory/*.md>
+  FILE: <src/prompts/*.txt | src/AGENTS.md | src/main.rs | src/memory/*.md>
   IMPROVEMENT: <one sentence>
   VERIFY: <exact shell command that would fail before the change and pass after>
 
 Rules:
-- One improvement only — the most impactful one
-- Name the specific file and the specific pattern to change
-- Prefer deletions and simplifications over additions
-- Only suggest something clearly worth the complexity cost
-- Do NOT output anything outside the FILE/IMPROVEMENT/VERIFY format
+- One improvement only; name the exact file and pattern
+- Lean first: delete or simplify before adding
+- No new dependencies (current: ureq, serde, serde_json)
+- No output outside the FILE/IMPROVEMENT/VERIFY format
 
-Priority:
+Priority (highest first):
 1. src/prompts/*.txt — prompts drive all LLM behavior
 2. src/AGENTS.md — orchestration rules
-3. src/main.rs — only when a code fix is clearly better than a prompt fix
+3. src/memory/*.md — persistent reference notes (add or correct)
+4. src/main.rs — only when a code fix is clearly better than a prompt fix
+
+Dimensions to evaluate across (rotate attention; do not fixate on one area):
+- Prompt clarity: vague instructions, missing constraints, fence-stripping, output format
+- Verification: does the agent confirm outcomes before claiming done?
+- Scope control: does the agent stay on one task at a time?
+- Context budget: is trajectory/history trimmed to keep cost low?
+- Memory hygiene: are derivable facts excluded; are notes stale or missing?
+- Lifecycle: are session boundaries, backup, and relaunch paths handled cleanly?
