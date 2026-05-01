@@ -57,31 +57,12 @@ export OPENROUTER_API_KEY=<your-key>
 ```mermaid
 flowchart TD
     A[auto-harness] --> B[interactive REPL]
-
     B --> C{input}
     C -->|/exit| Z[clean shutdown]
-    C -->|/evolve| D[evolve loop]
-    C -->|user message| E[LLM judge: NEW or CONTINUE task]
-    E --> F[send to LLM + print reply]
-    F --> G[run tool if present]
-    G --> C
-
-    D --> D1[reflect on unprocessed trajs]
-    D1 --> D2[evolution loop up to MAX_ITERS]
-    D2 --> D3{LLM reply}
-    D3 -->|SKIP| D5[exit loop]
-    D3 -->|write_self| D4[backup → write → cargo build]
-    D4 -->|fail| D6[restore + report error]
-    D6 --> D2
-    D4 -->|pass| D8{improved?}
-    D3 -->|write_file| D9[write prompts / AGENTS.md]
-    D9 --> D8
-    D8 -->|yes| D2
-    D8 -->|no, streak < PATIENCE| D2
-    D8 -->|no, streak >= PATIENCE| D5
-    D5 --> D7[doc update: CLAUDE.md + README.md]
-    D7 --> D10[clippy + cargo test]
-    D10 --> D11[exec evolved binary]
+    C -->|user message| E[LLM: chat + tools]
+    E --> C
+    C -->|/evolve| D[reflect → evolve → clippy/test → doc update]
+    D --> R[exec evolved binary]
 ```
 
 ---
@@ -97,25 +78,27 @@ flowchart TD
 
 ### `/evolve`
 1. **Reflect:** analyze unprocessed trajectories → one concrete improvement suggestion
-2. **Evolve:** up to `MAX_ITERS` iterations, one LLM-proposed change per iter (`write_self` or `write_file`)
-3. **Doc update:** rewrite `CLAUDE.md` and `README.md`
-4. **Validate:** `cargo clippy --release -- -D warnings` + `cargo test --release`
+2. **Evolve:** up to `MAX_ITERS` iterations; LLM sees full prompt files, `AGENTS.md`, `memory/*.md`, and `main.rs`; proposes one change per iter
+3. **Validate:** `cargo clippy --no-deps -- -D warnings` + `cargo test --release`
+4. **Doc update:** rewrite `CLAUDE.md` and `README.md` (reflects the tested, working state)
 5. **Relaunch:** `exec()` replaces the process with the freshly-built binary
 
 ---
 
 ## 🧩 Evolvable Artifacts
 
-| Artifact | How it evolves |
-|---|---|
-| `src/main.rs` | `write_self` (atomic rewrite + build verification) |
-| `src/AGENTS.md` | `write_file` |
-| `src/prompts/chat_system.txt` | `write_file` |
-| `src/prompts/reflect_system.txt` | `write_file` |
-| `src/prompts/evolve_system.txt` | `write_file` |
-| `src/prompts/doc_system.txt` | `write_file` |
-| `CLAUDE.md` | `write_file` (doc update step) |
-| `README.md` | `write_file` (doc update step) |
+| Artifact | Tool | Notes |
+|---|---|---|
+| `src/main.rs` | `write_self` | Atomic: backup → write → build-verify → restore on fail |
+| `src/AGENTS.md` | `write_file` | Backed up before overwrite |
+| `src/prompts/*.txt` | `write_file` | Backed up before overwrite |
+| `src/memory/*.md` | `write_file` | Reference notes; new files created freely |
+| `CLAUDE.md` / `README.md` | `write_file` | Doc update step |
+
+Evolution file rules (enforced at runtime):
+- `write_file` restricted to `src/memory/`, `src/prompts/`, `src/AGENTS.md`, `CLAUDE.md`, `README.md`
+- `delete_file` restricted to `src/`; `src/main.rs` and `src/AGENTS.md` are protected
+- All modified `src/` files are auto-backed-up as `<stem>.<ts>.<ext>.bak`
 
 ---
 
@@ -129,6 +112,7 @@ flowchart TD
 ├── src/
 │   ├── main.rs
 │   ├── AGENTS.md
+│   ├── memory/          ← reference notes, evolved freely
 │   └── prompts/
 │       ├── chat_system.txt
 │       ├── reflect_system.txt

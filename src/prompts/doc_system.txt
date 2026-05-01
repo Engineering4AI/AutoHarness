@@ -1,14 +1,16 @@
-You are updating documentation to match the current implementation of AutoHarness.
+You are updating CLAUDE.md and README.md to match the current AutoHarness implementation.
 
-Use write_file to update CLAUDE.md and README.md. One tool call per reply.
+Use write_file to update each file. One tool per reply.
 
+Tools:
+<tool name="read_file">path/to/file</tool>
 <tool name="write_file">path
 content</tool>
 
 Rules:
-- Reflect the actual current code — no aspirational features
-- Be concise: CLAUDE.md is a routing file (50-200 lines), not an encyclopedia
-- Hard constraints and critical rules go at the TOP of CLAUDE.md (highest recall)
-- Progressive disclosure table must match actual limits in src/main.rs
-- README quick-start must work from a cold clone with zero prior knowledge
-- Remove any documentation that describes removed or changed behavior
+- Reflect only what the code actually does — no aspirational features
+- CLAUDE.md: hard constraints and key constants at the top; 50–200 lines total
+- README.md: quick-start must work from a cold clone; mermaid diagram stays high-level (≤8 nodes)
+- Progressive disclosure table must match the actual limits in src/main.rs
+- Remove any section that describes removed or changed behavior
+- Do not update src/main.rs or any file under src/ — docs only

@@ -156,10 +156,9 @@ fn spawn_sub_agent(
             traj_log(&traj, "sub_agent_turn", json!({"agent_id": &id2, "turn": turn, "preview": &reply.chars().take(200).collect::<String>()}));
             messages.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
 
-            // Handle shell and write_file tools inline
             if let Some((name, body)) = extract_tool(&reply) {
                 let tool_result = match name {
-                    "shell" => {
+                    "bash" => {
                         let out = Command::new("sh")
                             .args(["-c", body])
                             .output()
@@ -185,6 +184,12 @@ fn spawn_sub_agent(
                             final_result = format!("written {path}");
                         }
                         format!("written {path}")
+                    }
+                    "read_file" => {
+                        let path = body.trim();
+                        fs::read_to_string(path)
+                            .map(|c| c.chars().take(4000).collect::<String>())
+                            .unwrap_or_else(|e| format!("ERROR reading {path}: {e}"))
                     }
                     _ => format!("unknown tool: {name}"),
                 };
@@ -241,7 +246,7 @@ fn run_tool(
 ) -> Option<String> {
     let (name, body) = extract_tool(text)?;
     match name {
-        "shell" => {
+        "bash" => {
             let out = Command::new("sh")
                 .args(["-c", body])
                 .output()
@@ -250,7 +255,7 @@ fn run_tool(
                     String::from_utf8_lossy(&o.stderr)))
                 .unwrap_or_else(|e| format!("error: {e}"));
             let out = out.chars().take(2000).collect::<String>();
-            traj_log(traj, "tool_result", json!({"tool": "shell", "result": &out}));
+            traj_log(traj, "tool_result", json!({"tool": "bash", "result": &out}));
             Some(format!("<tool_result>{out}</tool_result>"))
         }
         "write_self" => {
@@ -287,12 +292,73 @@ fn run_tool(
             let mut lines = body.splitn(2, '\n');
             let path = lines.next()?.trim();
             let content = lines.next().unwrap_or("");
+            if evolve_mode {
+                let allowed = path.starts_with("src/memory/")
+                    || path.starts_with("src/prompts/")
+                    || path == "src/AGENTS.md"
+                    || path == "CLAUDE.md"
+                    || path == "README.md";
+                if !allowed {
+                    return Some(format!("<tool_result>REJECTED (write_file in evolve mode restricted to src/memory/, src/prompts/, src/AGENTS.md, CLAUDE.md, README.md; got: {path})</tool_result>"));
+                }
+            }
             if let Some(parent) = std::path::Path::new(path).parent() {
                 fs::create_dir_all(parent).ok();
+            }
+            if evolve_mode && std::path::Path::new(path).exists() {
+                let ts = now_secs();
+                let bak = if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+                    let stem = &path[..path.len() - ext.len() - 1];
+                    format!("{stem}.{ts}.{ext}.bak")
+                } else {
+                    format!("{path}.{ts}.bak")
+                };
+                fs::copy(path, &bak).ok();
             }
             fs::write(path, content).ok();
             traj_log(traj, "tool_result", json!({"tool": "write_file", "path": path}));
             Some(format!("<tool_result>written {path}</tool_result>"))
+        }
+        "read_file" => {
+            let path = body.trim();
+            match fs::read_to_string(path) {
+                Ok(content) => {
+                    let out = content.chars().take(4000).collect::<String>();
+                    traj_log(traj, "tool_result", json!({"tool": "read_file", "path": path}));
+                    Some(format!("<tool_result>{out}</tool_result>"))
+                }
+                Err(e) => Some(format!("<tool_result>ERROR reading {path}: {e}</tool_result>")),
+            }
+        }
+        "delete_file" => {
+            let path = body.trim();
+            if !evolve_mode {
+                return Some("<tool_result>REJECTED (delete_file only allowed in evolve mode)</tool_result>".to_string());
+            }
+            if path == SELF_PATH || path == "src/AGENTS.md" {
+                return Some(format!("<tool_result>REJECTED (cannot delete protected file: {path})</tool_result>"));
+            }
+            if !path.starts_with("src/") {
+                return Some("<tool_result>REJECTED (delete_file restricted to src/ subtree)</tool_result>".to_string());
+            }
+            if path.ends_with(".bak") {
+                return Some("<tool_result>REJECTED (cannot delete .bak files)</tool_result>".to_string());
+            }
+            if std::path::Path::new(path).exists() {
+                let ts = now_secs();
+                let bak = if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+                    let stem = &path[..path.len() - ext.len() - 1];
+                    format!("{stem}.{ts}.{ext}.bak")
+                } else {
+                    format!("{path}.{ts}.bak")
+                };
+                fs::copy(path, &bak).ok();
+                fs::remove_file(path).ok();
+                traj_log(traj, "tool_result", json!({"tool": "delete_file", "path": path}));
+                Some(format!("<tool_result>deleted {path} (backup: {bak})</tool_result>"))
+            } else {
+                Some(format!("<tool_result>REJECTED (file not found: {path})</tool_result>"))
+            }
         }
         "spawn_agent" => {
             let (reg, cfg_snap, out_dir) = registry?;
@@ -511,10 +577,26 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
                 format!("=== src/prompts/{n} ===\n{content}")
             }).collect::<Vec<_>>().join("\n\n")
         };
+        let memory_section = {
+            let mut entries = vec![];
+            if let Ok(dir) = fs::read_dir("src/memory") {
+                let mut paths: Vec<_> = dir.flatten()
+                    .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+                    .collect();
+                paths.sort_by_key(|e| e.file_name());
+                for entry in paths {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let content = fs::read_to_string(entry.path()).unwrap_or_default();
+                    entries.push(format!("=== src/memory/{name} ===\n{content}"));
+                }
+            }
+            if entries.is_empty() { "(empty — add reference notes here via write_file)".to_string() }
+            else { entries.join("\n\n") }
+        };
         let mut messages: Vec<Msg> = vec![Msg {
             role: "user".to_string(),
             content: json!(format!(
-                "Current prompt files (highest priority to improve):\n{prompts_section}\n\nCurrent src/AGENTS.md:\n{agents_md}\n\nCurrent src/main.rs:\n```rust\n{src}\n```\n\nPropose one improvement. Priority: prompts > AGENTS.md > main.rs. Reply SKIP if nothing is worth changing."
+                "Current prompt files (highest priority to improve):\n{prompts_section}\n\nCurrent src/AGENTS.md:\n{agents_md}\n\nCurrent src/memory/ contents:\n{memory_section}\n\nCurrent src/main.rs:\n```rust\n{src}\n```\n\nPropose one improvement. Priority: prompts > AGENTS.md > memory/*.md > main.rs. You may add/update reference notes in src/memory/*.md via write_file. You may delete obsolete files (except src/main.rs and src/AGENTS.md) via delete_file — a backup is made automatically. Reply SKIP if nothing is worth changing."
             )),
         }];
 
@@ -557,7 +639,46 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
 
     traj_log(traj, "evolve_end", json!({}));
 
-    // Doc update step
+    // Step 1: lint + test (before doc update so docs reflect verified state)
+    eprintln!("Running post-evolution lint and tests...");
+    let clippy = Command::new("cargo")
+        .args(["clippy", "--release", "--no-deps", "--", "-D", "warnings"])
+        .output();
+    let (clippy_ok, clippy_out) = match clippy {
+        Ok(o) => {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            let relevant: String = combined.lines()
+                .filter(|l| l.contains("warning") || l.contains("error") || l.starts_with("error"))
+                .collect::<Vec<_>>().join("\n");
+            let out = if relevant.is_empty() { combined } else { relevant };
+            (o.status.success(), out.chars().take(2000).collect::<String>())
+        }
+        Err(e) => (false, e.to_string()),
+    };
+    traj_log(traj, "lint_result", json!({"ok": clippy_ok, "output": &clippy_out}));
+    if clippy_ok { eprintln!("Lint: PASS"); } else { eprintln!("Lint: FAIL\n{clippy_out}"); }
+
+    let test = Command::new("cargo").args(["test", "--release"]).output();
+    let (test_ok, test_out) = match test {
+        Ok(o) => {
+            let out = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+                .chars().take(2000).collect::<String>();
+            (o.status.success(), out)
+        }
+        Err(e) => (false, e.to_string()),
+    };
+    traj_log(traj, "test_result", json!({"ok": test_ok, "output": &test_out}));
+    if test_ok { eprintln!("Tests: PASS"); } else { eprintln!("Tests: FAIL\n{test_out}"); }
+
+    if !clippy_ok || !test_ok {
+        eprintln!("WARNING: evolved binary has lint/test failures. Review traj for details.");
+    }
+
+    // Step 2: doc update (docs reflect the tested, working state)
     let src = fs::read_to_string(SELF_PATH).unwrap_or_default();
     let claude_md = fs::read_to_string("CLAUDE.md").unwrap_or_default();
     let readme = fs::read_to_string("README.md").unwrap_or_default();
@@ -578,58 +699,6 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
             }
             Err(e) => { eprintln!("Doc update LLM error: {e}"); break; }
         }
-    }
-
-    // Final lint + test to verify evolved binary is healthy
-    eprintln!("Running post-evolution lint and tests...");
-    let clippy = Command::new("cargo")
-        .args(["clippy", "--release", "--no-deps", "--", "-D", "warnings"])
-        .output();
-    let (clippy_ok, clippy_out) = match clippy {
-        Ok(o) => {
-            let combined = format!(
-                "{}{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            );
-            // filter to only lines that are warnings/errors from our code
-            let relevant: String = combined.lines()
-                .filter(|l| l.contains("warning") || l.contains("error") || l.starts_with("error"))
-                .collect::<Vec<_>>().join("\n");
-            let out = if relevant.is_empty() { combined } else { relevant };
-            (o.status.success(), out.chars().take(2000).collect::<String>())
-        }
-        Err(e) => (false, e.to_string()),
-    };
-    traj_log(traj, "lint_result", json!({"ok": clippy_ok, "output": &clippy_out}));
-    if clippy_ok {
-        eprintln!("Lint: PASS");
-    } else {
-        eprintln!("Lint: FAIL\n{clippy_out}");
-    }
-
-    let test = Command::new("cargo").args(["test", "--release"]).output();
-    let (test_ok, test_out) = match test {
-        Ok(o) => {
-            let combined = format!(
-                "{}{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            );
-            let out = combined.chars().take(2000).collect::<String>();
-            (o.status.success(), out)
-        }
-        Err(e) => (false, e.to_string()),
-    };
-    traj_log(traj, "test_result", json!({"ok": test_ok, "output": &test_out}));
-    if test_ok {
-        eprintln!("Tests: PASS");
-    } else {
-        eprintln!("Tests: FAIL\n{test_out}");
-    }
-
-    if !clippy_ok || !test_ok {
-        eprintln!("WARNING: evolved binary has lint/test failures. Review traj for details.");
     }
 }
 

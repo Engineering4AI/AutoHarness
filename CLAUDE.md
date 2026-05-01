@@ -42,30 +42,45 @@ Task grouping: the LLM judges each new message as `NEW` or `CONTINUE`. Each task
 ### `/evolve` — reflection + code evolution
 
 1. **Reflect**: reads session trajs newer than the watermark → asks LLM for one concrete improvement suggestion → advances watermark.
-2. **Evolve**: up to `MAX_ITERS` iterations. Each iter shows the LLM `src/main.rs` + `src/AGENTS.md` → LLM proposes one change via `write_self` or `write_file` → verified. Stops on `SKIP` or `PATIENCE` consecutive non-improving iters.
-3. **Doc update**: after the loop, LLM rewrites `CLAUDE.md` and `README.md` via `write_file`.
-4. **Lint + test**: `cargo clippy -- -D warnings` then `cargo test --release`; results logged to traj as `lint_result`/`test_result`; failures print a WARNING to stderr.
+2. **Evolve**: up to `MAX_ITERS` iterations. Each iter shows the LLM the full prompt files, `src/AGENTS.md`, `src/memory/*.md`, and `src/main.rs` → LLM proposes one change → verified. Stops on `SKIP` or `PATIENCE` consecutive non-improving iters.
+3. **Lint + test**: `cargo clippy --no-deps -- -D warnings` then `cargo test --release`; results logged; failures print WARNING to stderr.
+4. **Doc update**: LLM rewrites `CLAUDE.md` and `README.md` via `write_file` — docs reflect the tested, working state.
 5. **Relaunch**: `exec()` replaces the current process with the freshly-built binary.
 
 ## Evolvable artifacts
 
-| Artifact | How evolved |
-|---|---|
-| `src/main.rs` | `write_self` tool (atomic: backup → write → `cargo build` → restore on failure) |
-| `src/AGENTS.md` | `write_file` tool |
-| `src/prompts/*.txt` | `write_file` tool |
-| `CLAUDE.md` | `write_file` tool (doc update step) |
-| `README.md` | `write_file` tool (doc update step) |
+| Artifact | Tool | Notes |
+|---|---|---|
+| `src/main.rs` | `write_self` | Atomic: backup → write → `cargo build` → restore on failure |
+| `src/AGENTS.md` | `write_file` | Backed up before overwrite |
+| `src/prompts/*.txt` | `write_file` | Backed up before overwrite |
+| `src/memory/*.md` | `write_file` | Reference notes; created freely |
+| `CLAUDE.md` | `write_file` | Doc update step |
+| `README.md` | `write_file` | Doc update step |
+
+### Evolution file permissions (enforced in `run_tool`)
+
+In evolve mode:
+- `write_file`: allowed only to `src/memory/`, `src/prompts/`, `src/AGENTS.md`, `CLAUDE.md`, `README.md`
+- `delete_file`: allowed only within `src/`; `src/main.rs` and `src/AGENTS.md` are protected; auto-backs-up before deletion
+- `write_self`: `src/main.rs` only (always build-verified)
+- New files may be created under `src/memory/` and `src/prompts/` freely
+- All existing `src/` files are backed up with `<stem>.<ts>.<ext>.bak` before modification
 
 ## Tool protocol
 
 LLM emits plain-text tags parsed by `run_tool()`:
 
 ```
-<tool name="shell">command here</tool>
-<tool name="write_self">...full file content...</tool>
+<tool name="bash">command here</tool>
+<tool name="read_file">path/to/file</tool>
 <tool name="write_file">path/to/file
 ...full file content...</tool>
+<tool name="write_self">...full file content...</tool>
+<tool name="delete_file">src/path/to/file</tool>
+<tool name="spawn_agent">output.md
+task description</tool>
+<tool name="wait_agent">agent_<ts></tool>
 ```
 
 One tool per LLM turn. Results fed back as `<tool_result>...</tool_result>`. Up to 8 turns per iteration.
@@ -86,9 +101,9 @@ One tool per LLM turn. Results fed back as `<tool_result>...</tool_result>`. Up 
 | Reflection traj | 8 000 chars | Strip `content`/`preview` fields; cap strings at 120 chars; take last N lines |
 | Task-grouping judge | 6 messages | Sliding window |
 | Chat history | 20 messages | `drain(..len-20)` after each push |
-| Shell output | 2 000 chars | `.chars().take(2000)` |
+| bash output | 2 000 chars | `.chars().take(2000)` |
 | Build error | 400 chars | Substring on compiler stderr |
-| Evolve iter | full `src/main.rs` + `src/AGENTS.md` | LLM must see whole files to propose a change |
+| Evolve iter | full `src/main.rs` + prompts + `src/AGENTS.md` + `src/memory/*.md` | LLM must see whole files to propose a change |
 | Doc update | full `src/main.rs` + `CLAUDE.md` + `README.md` | One-shot, acceptable |
 
 ## Trajectory logging
@@ -119,7 +134,9 @@ outputs/<ts>/
   task_2/                       # artifacts for task 2
 src/
   main.rs                       # agent source (self-rewriting)
-  AGENTS.md                     # agent orchestration guide (self-evolving)
+  AGENTS.md                     # agent orchestration guide (self-evolving, protected)
+  memory/                       # reference notes (created/updated by evolution)
+    *.md
   prompts/
     chat_system.txt             # chat mode system prompt
     reflect_system.txt          # reflection system prompt
