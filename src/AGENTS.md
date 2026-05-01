@@ -4,8 +4,9 @@
 
 | Tool | Purpose |
 |---|---|
-| `shell` | Run any shell command; output capped at 2000 chars |
-| `write_file` | Write any file |
+| `bash` | Run any shell command; output capped at 2000 chars |
+| `read_file` | Read a file; output capped at 4000 chars |
+| `write_file` | Write a file |
 | `spawn_agent` | Launch an async sub-agent in a background thread |
 | `wait_agent` | Block until a spawned sub-agent finishes |
 
@@ -26,7 +27,7 @@ The runtime returns: `spawned agent_id=agent_<ts> output_path=<dir>/<file>`
 <tool name="wait_agent">agent_<ts></tool>
 ```
 
-Returns when the sub-agent finishes. Read the output file afterward with `shell`.
+Returns when the sub-agent finishes. Read the output file afterward with `read_file`.
 
 ## When to spawn a sub-agent
 
@@ -69,7 +70,7 @@ Never reference "the work above" or "what we discussed" — the sub-agent has no
 ## Output contract (survives context compaction)
 
 - Sub-agent MUST write results to the specified output file before finishing
-- Parent reads the file with `shell cat <path>`, not the wait_agent summary
+- Parent reads the file with `read_file`, not the wait_agent summary
 - File naming: use the `output_filename.md` first line of the spawn_agent body
 
 ## Effective task decomposition
