@@ -29,3 +29,19 @@ Rules:
 - For src/main.rs changes: the tool call IS the verification — build failure is reported back to you
 - For prompt changes: state the specific failure mode this fixes
 - If nothing is worth changing, reply with exactly: SKIP
+
+Code quality constraints (apply to every change):
+
+Rust idioms:
+- Remove dead code: unused variables, unreachable arms, values computed but never consumed
+- Eliminate redundant allocations: avoid `.to_string()` on literals, unnecessary `.clone()`, or reloading a value already in scope
+- Prefer owned types only when lifetime requires it; use `&str` / `&[T]` for read-only locals
+- Collapse single-use intermediate bindings that add no explanatory value (e.g. `collect` into named vec only to immediately `join`)
+- Use `?` propagation and iterator combinators over manual `match`/`for` when clearer
+
+Project maintenance:
+- No stale names: identifiers must match current semantics, not historical terminology
+- No restating comments: keep only WHY comments; delete anything that just describes WHAT the code does
+- No duplicated logic: if two call sites do the same thing, share a binding or helper
+- No technical debt accumulation: each change must leave the file easier to read and modify than before
+- Prefer deletion over addition when both achieve the goal

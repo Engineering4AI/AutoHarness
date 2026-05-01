@@ -126,7 +126,6 @@ fn extract_tool(text: &str) -> Option<(&str, &str)> {
 }
 
 fn parse_path_range(body: &str) -> (&str, Option<(usize, usize)>) {
-    // Accepts "path/to/file" or "path/to/file start..end"
     if let Some(sp) = body.rfind(' ') {
         let candidate = &body[sp + 1..];
         if let Some(dd) = candidate.find("..") {
@@ -179,7 +178,6 @@ fn spawn_sub_agent(cfg_snap: (String, String, String), task: &str, output_path: 
             traj_log(&traj, "sub_agent_turn", json!({"agent_id": &id2, "turn": turn, "preview": &reply.chars().take(200).collect::<String>()}));
             messages.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
             if let Some(tool_result) = run_tool(&reply, &traj, false, None) {
-                // Detect if the sub-agent just wrote the output file
                 let wrote = tool_result.contains(&format!("written {output_path}"))
                     || tool_result.contains("written and verified OK");
                 if wrote { final_result = format!("written {output_path}"); }
@@ -234,7 +232,6 @@ fn run_tool(text: &str, traj: &str, evolve_mode: bool, registry: Option<(&AgentR
                 }
             }
             if let Some(parent) = Path::new(path).parent() { fs::create_dir_all(parent).ok(); }
-            // Build final content — apply range patch if specified
             let final_content: String = if let Some((start, end)) = range {
                 let existing = fs::read_to_string(path).unwrap_or_default();
                 let chars: Vec<char> = existing.chars().collect();
@@ -431,10 +428,9 @@ fn reflect(cfg: &Cfg, traj: &str) {
         let session_ts: u64 = name.to_string_lossy().trim_end_matches(".jsonl").parse().unwrap_or(0);
         let traj_path = entry.path().to_string_lossy().to_string();
 
-        // Progressive disclosure: strip content/preview, cap strings; LLM can read_file for full traj
         let summary: String = {
             let raw = fs::read_to_string(&traj_path).unwrap_or_default();
-            let stripped: Vec<String> = raw.lines()
+            let joined = raw.lines()
                 .filter_map(|l| {
                     let mut v: Value = serde_json::from_str(l).ok()?;
                     if let Some(obj) = v.get_mut("data") {
@@ -447,8 +443,8 @@ fn reflect(cfg: &Cfg, traj: &str) {
                     }
                     Some(v.to_string())
                 })
-                .collect();
-            let joined = stripped.join("\n");
+                .collect::<Vec<_>>()
+                .join("\n");
             if joined.len() > 8000 { joined[joined.len() - 8000..].to_string() } else { joined }
         };
 
@@ -580,8 +576,8 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
 
     traj_log(traj, "evolve_end", json!({}));
 
-    // Reduce slop: feed clippy+test output to LLM for content fixes before final verification
-    eprintln!("Running pre-verification lint and tests for slop check...");
+    // Refine: feed clippy+test failures to LLM for fixes before final verification
+    eprintln!("Refine: running lint and tests...");
     let run_clippy = || -> (bool, String) {
         match Command::new("cargo").args(["clippy", "--release", "--no-deps", "--", "-D", "warnings"]).output() {
             Ok(o) => {
@@ -610,22 +606,21 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
     let (test_ok, test_out) = run_test();
 
     if !clippy_ok || !test_ok {
-        eprintln!("Slop detected — asking LLM to fix before final verification...");
-        let slop_system = load_prompt("evolve_system.txt");
+        eprintln!("Refine: issues found, asking LLM to fix...");
         let issues = format!(
             "Post-evolution check found issues. Fix them using write_file. Reply SKIP if nothing to fix.\n\nClippy (ok={clippy_ok}):\n{clippy_out}\n\nTests (ok={test_ok}):\n{test_out}"
         );
-        let mut slop_msgs = vec![Msg { role: "user".to_string(), content: json!(issues) }];
+        let mut refine_msgs = vec![Msg { role: "user".to_string(), content: json!(issues) }];
         loop {
-            match llm(cfg, &slop_msgs, &slop_system) {
+            match llm(cfg, &refine_msgs, &evolve_system) {
                 Ok(reply) => {
-                    slop_msgs.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
+                    refine_msgs.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
                     if reply.trim().to_uppercase().starts_with("SKIP") { break; }
                     if let Some(result) = run_tool(&reply, traj, true, None) {
-                        slop_msgs.push(Msg { role: "user".to_string(), content: json!(result) });
+                        refine_msgs.push(Msg { role: "user".to_string(), content: json!(result) });
                     } else { break; }
                 }
-                Err(e) => { eprintln!("Reduce slop LLM error: {e}"); break; }
+                Err(e) => { eprintln!("Refine LLM error: {e}"); break; }
             }
         }
     }
@@ -639,13 +634,11 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
     if clippy_ok { eprintln!("Lint: PASS"); } else { eprintln!("Lint: FAIL\n{clippy_out}"); }
     if test_ok { eprintln!("Tests: PASS"); } else { eprintln!("Tests: FAIL\n{test_out}"); }
     if !clippy_ok || !test_ok {
-        eprintln!("WARNING: evolved binary still has lint/test failures after slop reduce.");
+        eprintln!("WARNING: evolved binary still has lint/test failures after refine.");
     }
 
-    // Backup all files changed during this evolution run (git diff --name-only)
     backup_evolved_files();
 
-    // Doc update — final step, after all iterations complete
     let src = fs::read_to_string(SELF_PATH).unwrap_or_default();
     let claude_md = fs::read_to_string("CLAUDE.md").unwrap_or_default();
     let readme = fs::read_to_string("README.md").unwrap_or_default();
@@ -741,26 +734,19 @@ mod tests {
         let slot2 = slot.clone();
         registry.lock().unwrap().push(("agent_test".to_string(), slot));
 
-        // Should be None (still running)
         assert!(poll_agent(&registry, "agent_test").is_none());
 
-        // Mark done
         *slot2.lock().unwrap() = Some("written output.md".to_string());
 
-        // Should now return result
         assert_eq!(poll_agent(&registry, "agent_test"), Some("written output.md".to_string()));
     }
 
     #[test]
     fn test_spawn_sub_agent_writes_output() {
-        // This test exercises the spawn path without hitting the real LLM.
-        // We verify: registry gets an entry, output file is eventually written.
-        // We use a pre-written output file to simulate agent completion.
         let dir = std::env::temp_dir().join(format!("autoharness_test_{}", now_secs()));
         fs::create_dir_all(&dir).unwrap();
         let output_path = dir.join("result.md");
 
-        // Write the output file directly (simulating a fast agent)
         fs::write(&output_path, "test result").unwrap();
 
         let registry: AgentRegistry = Arc::new(Mutex::new(vec![]));
@@ -797,41 +783,28 @@ mod tests {
 
     #[test]
     fn test_run_tool_spawn_and_wait() {
-        // Exercise run_tool dispatch for spawn_agent + wait_agent end-to-end
-        // without hitting a real LLM. We verify:
-        //   1. spawn_agent tool tag is parsed, registry entry created, agent_id returned
-        //   2. wait_agent blocks until the background thread writes the output file
-        //      (the thread will fail LLM call, fall back to writing a "no output" result,
-        //       but it still completes and sets the slot)
-        // We skip actual LLM by pointing at an unreachable endpoint — the thread errors
-        // and still writes the slot, which is what we verify.
         let dir = std::env::temp_dir().join(format!("autoharness_rtt_{}", now_secs()));
         fs::create_dir_all(&dir).unwrap();
         let out_dir = dir.to_string_lossy().to_string();
         let traj = format!("{out_dir}/traj.jsonl");
 
         let registry: AgentRegistry = Arc::new(Mutex::new(vec![]));
-        // Use a bogus endpoint so the LLM call fails fast
         let cfg_snap = (
             "dummy_key".to_string(),
-            "http://127.0.0.1:1".to_string(), // nothing listening here
+            "http://127.0.0.1:1".to_string(), // unreachable — LLM fails fast
             "test-model".to_string(),
         );
 
-        let spawn_text = format!(
-            "<tool name=\"spawn_agent\">sub_out.md\nWrite the word DONE to the output file.</tool>"
-        );
-        let result = run_tool(&spawn_text, &traj, false, Some((&registry, &cfg_snap, &out_dir)));
+        let spawn_text = "<tool name=\"spawn_agent\">sub_out.md\nWrite the word DONE to the output file.</tool>";
+        let result = run_tool(spawn_text, &traj, false, Some((&registry, &cfg_snap, &out_dir)));
         let result_str = result.unwrap();
         assert!(result_str.contains("spawned agent_"), "got: {result_str}");
 
-        // Extract agent_id from result: "<tool_result>spawned agent_<ts> → ..."
         let agent_id = result_str
             .split("spawned ").nth(1).unwrap()
             .split_whitespace().next().unwrap()
             .to_string();
 
-        // wait_agent should block until thread finishes (fails LLM, sets slot)
         let wait_text = format!("<tool name=\"wait_agent\">{agent_id}</tool>");
         let wait_result = run_tool(&wait_text, &traj, false, Some((&registry, &cfg_snap, &out_dir)));
         let wait_str = wait_result.unwrap();
@@ -856,28 +829,25 @@ mod tests {
 
     #[test]
     fn test_parse_path_range_edge_inverted() {
-        // end < start after clamping: max(start) ensures empty but no panic
         let (path, range) = parse_path_range("src/main.rs 200..100");
         assert_eq!(path, "src/main.rs");
-        // parse_path_range returns raw; clamping happens at use site
         assert_eq!(range, Some((200, 100)));
-        // Simulate what read_file does: clamp start, then end.max(start)
+        // clamping at use site: inverted range collapses to empty slice, no panic
         let total = 50usize;
         let (s, e) = range.unwrap();
-        let s = s.min(total); // 50
-        let e = e.min(total).max(s); // min(100,50)=50, max(50,50)=50 → empty slice, no panic
+        let s = s.min(total);
+        let e = e.min(total).max(s);
         assert_eq!(s, 50);
         assert_eq!(e, 50);
     }
 
     #[test]
     fn test_parse_path_range_oob() {
-        // start and end both beyond file length
+        // both offsets beyond file length clamp to total → empty slice, no panic
         let total = 10usize;
-        let (s, e) = (9999usize, 99999usize);
-        let s = s.min(total);       // 10
-        let e = e.min(total).max(s); // 10
+        let s = 9999usize.min(total);
+        let e = 99999usize.min(total).max(s);
         assert_eq!(s, 10);
-        assert_eq!(e, 10); // empty slice, no panic
+        assert_eq!(e, 10);
     }
 }

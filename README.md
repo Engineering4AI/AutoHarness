@@ -61,7 +61,7 @@ flowchart TD
     C -->|/exit| Z[clean shutdown]
     C -->|user message| E[LLM: chat + tools]
     E --> C
-    C -->|/evolve| D[reflect → evolve loop → reduce slop → lint/test → doc update]
+    C -->|/evolve| D[reflect → evolve → refine → lint/test → doc update]
     D --> R[exec evolved binary]
 ```
 
@@ -79,7 +79,7 @@ flowchart TD
 ### `/evolve`
 1. **Reflect:** analyze unprocessed trajectories (progressive disclosure — stripped summary first; LLM reads more via `read_file path start..end`) → one concrete improvement suggestion
 2. **Evolve:** unbounded iterations; LLM sees full prompt files, `AGENTS.md`, `memory/` index (filepath + description), and `main.rs`; proposes one change per iter; stops on `SKIP`
-3. **Reduce slop:** clippy + test output fed to LLM for `write_file` fixes
+3. **Refine:** clippy + test output fed to LLM for `write_file` fixes
 4. **Final lint/test:** `cargo clippy --no-deps -- -D warnings` + `cargo test --release` — authoritative gate
 5. **Doc update:** rewrite `CLAUDE.md` and `README.md` (reflects the verified, working state)
 6. **Relaunch:** `exec()` replaces the process with the freshly-built binary

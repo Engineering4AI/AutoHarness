@@ -43,7 +43,7 @@ Task grouping: the LLM judges each new message as `NEW` or `CONTINUE`. Each task
 
 1. **Reflect**: reads session trajs newer than the watermark (progressive disclosure: stripped summary first; LLM may call `read_file` with a char range for full detail) → one concrete improvement suggestion → advances watermark.
 2. **Evolve**: unbounded iterations. Each iter shows the LLM the full prompt files, `src/AGENTS.md`, `src/memory/` index (filepath + description), and `src/main.rs` → LLM proposes one change → verified. Stops when LLM replies `SKIP`.
-3. **Reduce slop**: runs clippy + tests, feeds any failures to the LLM for `write_file` fixes.
+3. **Refine**: runs clippy + tests, feeds any failures to the LLM for `write_file` fixes.
 4. **Final lint + test**: `cargo clippy --no-deps -- -D warnings` then `cargo test --release`; results logged.
 5. **Doc update**: LLM rewrites `CLAUDE.md` and `README.md` via `write_file` — docs reflect the verified, working state.
 6. **Relaunch**: `exec()` replaces the current process with the freshly-built binary.
