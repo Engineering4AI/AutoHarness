@@ -37,7 +37,7 @@ Slash commands:
 - `/exit` — clean shutdown
 - `/evolve` — run evolution loop, then re-exec the updated binary (same process slot)
 
-Task grouping: the LLM judges each new message as `NEW` or `CONTINUE`. Each task gets its own output directory `outputs/<ts>/task_N`.
+Task grouping: the LLM judges each new message as `NEW` or `CONTINUE`. Each task gets its own output directory `outputs/<ts>/task_N`. After the assistant stops using tools, the harness runs a completion check; if more work is needed, it appends a continuation prompt for the same task. Check errors are logged and return control to the REPL.
 
 ### `/evolve` — reflection + code evolution
 
@@ -105,6 +105,7 @@ Both tools accept an optional `start..end` char-offset range on the first line:
 |---|---|---|
 | Reflection traj | 8 000 chars | Strip `content`/`preview` fields; cap strings at 120 chars; LLM may `read_file path start..end` for more |
 | Task-grouping judge | 6 messages | Sliding window |
+| Completion judge | 12 messages | Sliding window plus original user prompt |
 | Chat history | 20 messages | `drain(..len-20)` after each push |
 | bash output | 2 000 chars | `.chars().take(2000)` |
 | Build error | 400 chars | Substring on compiler stderr |

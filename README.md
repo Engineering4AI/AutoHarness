@@ -72,6 +72,7 @@ flowchart TD
 ### Interactive REPL
 - Async stdin queue (`VecDeque` fed by a background thread)
 - LLM decides if each message starts a **new task** or **continues** the current one
+- After the assistant stops using tools, a completion check can continue the same task instead of immediately returning to the prompt
 - Task artifacts go to `outputs/<ts>/task_N/`
 - All events logged to `.evo/sessions/<ts>/traj.jsonl`
 - Slash commands: `/exit` (quit), `/evolve` (evolve + relaunch)
@@ -101,6 +102,41 @@ Evolution file rules (enforced at runtime):
 - `src/main.rs` writes trigger `cargo build --release`; failure auto-reverts
 - `delete_file` restricted to `src/`; `src/main.rs` and `src/AGENTS.md` are protected
 - All modified files auto-backed-up as `<stem>.<ts>.<ext>.bak`
+
+---
+
+## 📉 Progressive Disclosure
+
+| Call site | Limit | Mechanism |
+|---|---|---|
+| Reflection traj | 8 000 chars | Strip `content`/`preview` fields; cap strings at 120 chars; LLM may `read_file path start..end` for more |
+| Task-grouping judge | 6 messages | Sliding window |
+| Completion judge | 12 messages | Sliding window plus original user prompt |
+| Chat history | 20 messages | `drain(..len-20)` after each push |
+| bash output | 2 000 chars | `.chars().take(2000)` |
+| Build error | 400 chars | Substring on compiler stderr |
+| `read_file` default window | 16 000 chars | LLM sees hint to continue reading with next range |
+| Evolve iter | full `src/main.rs` + prompts + `src/AGENTS.md` + `src/memory/` index (filepath + desc) | LLM must see whole files to propose a change |
+| Doc update | full `src/main.rs` + `CLAUDE.md` + `README.md` | One-shot, acceptable |
+
+---
+
+## 🧾 Trajectory Logging
+
+Every run creates `.evo/sessions/<unix_timestamp>/traj.jsonl`:
+
+```json
+{"ts": 1713300000, "kind": "session_start",  "data": {}}
+{"ts": 1713300001, "kind": "user_input",      "data": "fix the bug"}
+{"ts": 1713300005, "kind": "llm_response",    "data": {"task": 1, "turn": 1, "preview": "..."}}
+{"ts": 1713300008, "kind": "task_boundary",   "data": {"task": 2}}
+{"ts": 1713300010, "kind": "tool_result",     "data": {"tool": "write_self", "result": "written and verified OK"}}
+{"ts": 1713300011, "kind": "session_end",     "data": {"turns": 4}}
+{"ts": 1713300020, "kind": "iter_start",      "data": {"iter": 1}}
+{"ts": 1713300025, "kind": "iter_end",        "data": {"iter": 1, "improved": true}}
+{"ts": 1713300026, "kind": "iter_skip",       "data": {"iter": 2, "reason": "LLM chose not to evolve"}}
+{"ts": 1713300027, "kind": "evolve_end",      "data": {}}
+```
 
 ---
 

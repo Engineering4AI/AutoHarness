@@ -5,10 +5,10 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::path::Path;
 
 const SELF_PATH: &str = "src/main.rs";
 const WATERMARK_PATH: &str = ".evo/learned_until.txt";
@@ -20,11 +20,17 @@ struct Msg {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn traj_log(path: &str, kind: &str, data: Value) {
-    let line = format!("{}\n", json!({"ts": now_secs(), "kind": kind, "data": data}));
+    let line = format!(
+        "{}\n",
+        json!({"ts": now_secs(), "kind": kind, "data": data})
+    );
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         f.write_all(line.as_bytes()).ok();
     }
@@ -46,14 +52,16 @@ impl Cfg {
             api_key,
             base_url: env::var("INFERENCE_BASE_URL")
                 .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string()),
-            model: env::var("MODEL_NAME")
-                .unwrap_or_else(|_| "anthropic/claude-opus-4".to_string()),
+            model: env::var("MODEL_NAME").unwrap_or_else(|_| "anthropic/claude-opus-4".to_string()),
         }
     }
 }
 
 fn llm(cfg: &Cfg, messages: &[Msg], system: &str) -> Result<String, String> {
-    let mut msgs = vec![Msg { role: "system".to_string(), content: json!(system) }];
+    let mut msgs = vec![Msg {
+        role: "system".to_string(),
+        content: json!(system),
+    }];
     msgs.extend_from_slice(messages);
     let body = json!({"model": cfg.model, "max_tokens": 4096, "messages": msgs});
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
@@ -75,38 +83,75 @@ fn load_prompt(name: &str) -> String {
 }
 
 fn frontmatter_description(content: &str) -> Option<&str> {
-    let inner = content.strip_prefix("---\n")?.splitn(2, "\n---").next()?;
-    inner.lines()
+    let inner = content.strip_prefix("---\n")?.split("\n---").next()?;
+    inner
+        .lines()
         .find(|l| l.starts_with("description:"))
         .map(|l| l["description:".len()..].trim())
 }
 
 fn memory_index() -> String {
-    let Ok(dir) = fs::read_dir("src/memory") else { return "(none)".to_string() };
-    let entries: Vec<_> = dir.flatten()
+    let Ok(dir) = fs::read_dir("src/memory") else {
+        return "(none)".to_string();
+    };
+    let entries: Vec<_> = dir
+        .flatten()
         .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
         .collect();
-    if entries.is_empty() { return "(none)".to_string(); }
-    entries.iter().map(|e| {
-        let path = e.path();
-        let filepath = format!("src/memory/{}", e.file_name().to_string_lossy());
-        let content = fs::read_to_string(&path).unwrap_or_default();
-        let desc = frontmatter_description(&content)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| content.lines().next().unwrap_or("").chars().take(100).collect());
-        format!("  {filepath} — {desc}")
-    }).collect::<Vec<_>>().join("\n")
+    if entries.is_empty() {
+        return "(none)".to_string();
+    }
+    entries
+        .iter()
+        .map(|e| {
+            let path = e.path();
+            let filepath = format!("src/memory/{}", e.file_name().to_string_lossy());
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            let desc = frontmatter_description(&content)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    content
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(100)
+                        .collect()
+                });
+            format!("  {filepath} — {desc}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn is_new_task(cfg: &Cfg, history: &[Msg], next_input: &str) -> bool {
     let system = "You decide if a new user message starts a NEW task or continues the current one. Reply with exactly one word: NEW or CONTINUE.";
     let start = history.len().saturating_sub(6);
     let mut msgs = history[start..].to_vec();
-    msgs.push(Msg { role: "user".to_string(), content: json!(next_input) });
+    msgs.push(Msg {
+        role: "user".to_string(),
+        content: json!(next_input),
+    });
     match llm(cfg, &msgs, system) {
         Ok(r) => r.trim().to_uppercase().starts_with("NEW"),
-        Err(e) => { eprintln!("Task-judge error (defaulting CONTINUE): {e}"); false }
+        Err(e) => {
+            eprintln!("Task-judge error (defaulting CONTINUE): {e}");
+            false
+        }
     }
+}
+
+fn goal_materialized(cfg: &Cfg, history: &[Msg], goal: &str) -> Result<bool, String> {
+    let system = "You are the harness goal judge. Decide whether the original user goal has been fully materialized in the current workspace/conversation. Reply with exactly one token: GOAL_COMPLETE or CONTINUE.";
+    let start = history.len().saturating_sub(12);
+    let mut msgs = history[start..].to_vec();
+    msgs.push(Msg {
+        role: "user".to_string(),
+        content: json!(format!(
+            "Original user goal:\n{goal}\n\nHas this goal been fully materialized? Reply exactly GOAL_COMPLETE or CONTINUE."
+        )),
+    });
+    llm(cfg, &msgs, system).map(|r| r.trim().to_uppercase().starts_with("GOAL_COMPLETE"))
 }
 
 fn extract_tool(text: &str) -> Option<(&str, &str)> {
@@ -117,7 +162,7 @@ fn extract_tool(text: &str) -> Option<(&str, &str)> {
     let body_end = text[body_start..].find("</tool>")? + body_start;
     let raw = text[body_start..body_end].trim();
     let body = if raw.starts_with("```") {
-        let after = raw.find('\n').map(|i| &raw[i+1..]).unwrap_or(raw);
+        let after = raw.find('\n').map(|i| &raw[i + 1..]).unwrap_or(raw);
         after.trim_end_matches("```").trim()
     } else {
         raw
@@ -141,13 +186,21 @@ fn parse_path_range(body: &str) -> (&str, Option<(usize, usize)>) {
 
 fn bak_path(path: &str) -> String {
     let ts = now_secs();
-    let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
-    if ext.is_empty() { format!("{path}.{ts}.bak") }
-    else { format!("{}.{ts}.{ext}.bak", &path[..path.len() - ext.len() - 1]) }
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    if ext.is_empty() {
+        format!("{path}.{ts}.bak")
+    } else {
+        format!("{}.{ts}.{ext}.bak", &path[..path.len() - ext.len() - 1])
+    }
 }
 
 fn backup_evolved_files() {
-    let Ok(out) = Command::new("git").args(["diff", "--name-only"]).output() else { return };
+    let Ok(out) = Command::new("git").args(["diff", "--name-only"]).output() else {
+        return;
+    };
     for path in String::from_utf8_lossy(&out.stdout).lines() {
         if Path::new(path).exists() {
             fs::copy(path, bak_path(path)).ok();
@@ -157,42 +210,84 @@ fn backup_evolved_files() {
 
 type AgentRegistry = Arc<Mutex<Vec<(String, Arc<Mutex<Option<String>>>)>>>;
 
-fn spawn_sub_agent(cfg_snap: (String, String, String), task: &str, output_path: &str, traj: &str, registry: &AgentRegistry) -> String {
+fn spawn_sub_agent(
+    cfg_snap: (String, String, String),
+    task: &str,
+    output_path: &str,
+    traj: &str,
+    registry: &AgentRegistry,
+) -> String {
     let agent_id = format!("agent_{}", now_secs());
     let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let slot2 = slot.clone();
-    let (task, output_path, traj, id2) = (task.to_string(), output_path.to_string(), traj.to_string(), agent_id.clone());
+    let (task, output_path, traj, id2) = (
+        task.to_string(),
+        output_path.to_string(),
+        traj.to_string(),
+        agent_id.clone(),
+    );
     std::thread::spawn(move || {
-        let cfg = Cfg { api_key: cfg_snap.0, base_url: cfg_snap.1, model: cfg_snap.2 };
+        let cfg = Cfg {
+            api_key: cfg_snap.0,
+            base_url: cfg_snap.1,
+            model: cfg_snap.2,
+        };
         let system = load_prompt("chat_system.txt");
         let mut messages = vec![Msg { role: "user".to_string(), content: json!(format!("You are a sub-agent. Complete this task and write the result to {output_path}.\n\nTask:\n{task}")) }];
-        traj_log(&traj, "sub_agent_start", json!({"agent_id": &id2, "output_path": &output_path}));
+        traj_log(
+            &traj,
+            "sub_agent_start",
+            json!({"agent_id": &id2, "output_path": &output_path}),
+        );
         let mut final_result = format!("sub-agent {id2}: no output produced");
         let mut turn = 0usize;
         loop {
             turn += 1;
             let reply = match llm(&cfg, &messages, &system) {
                 Ok(r) => r,
-                Err(e) => { final_result = format!("sub-agent {id2} LLM error turn {turn}: {e}"); break; }
+                Err(e) => {
+                    final_result = format!("sub-agent {id2} LLM error turn {turn}: {e}");
+                    break;
+                }
             };
-            traj_log(&traj, "sub_agent_turn", json!({"agent_id": &id2, "turn": turn, "preview": &reply.chars().take(200).collect::<String>()}));
-            messages.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
+            traj_log(
+                &traj,
+                "sub_agent_turn",
+                json!({"agent_id": &id2, "turn": turn, "preview": &reply.chars().take(200).collect::<String>()}),
+            );
+            messages.push(Msg {
+                role: "assistant".to_string(),
+                content: json!(&reply),
+            });
             if let Some(tool_result) = run_tool(&reply, &traj, false, None) {
                 let wrote = tool_result.contains(&format!("written {output_path}"))
                     || tool_result.contains("written and verified OK");
-                if wrote { final_result = format!("written {output_path}"); }
-                messages.push(Msg { role: "user".to_string(), content: json!(tool_result) });
-                if wrote { break; }
+                if wrote {
+                    final_result = format!("written {output_path}");
+                }
+                messages.push(Msg {
+                    role: "user".to_string(),
+                    content: json!(tool_result),
+                });
+                if wrote {
+                    break;
+                }
             } else {
                 if !Path::new(&output_path).exists() {
-                    if let Some(par) = Path::new(&output_path).parent() { fs::create_dir_all(par).ok(); }
+                    if let Some(par) = Path::new(&output_path).parent() {
+                        fs::create_dir_all(par).ok();
+                    }
                     fs::write(&output_path, &reply).ok();
                     final_result = format!("written {output_path} (from reply)");
                 }
                 break;
             }
         }
-        traj_log(&traj, "sub_agent_end", json!({"agent_id": &id2, "result": &final_result}));
+        traj_log(
+            &traj,
+            "sub_agent_end",
+            json!({"agent_id": &id2, "result": &final_result}),
+        );
         *slot2.lock().unwrap() = Some(final_result);
     });
     registry.lock().unwrap().push((agent_id.clone(), slot));
@@ -202,17 +297,33 @@ fn spawn_sub_agent(cfg_snap: (String, String, String), task: &str, output_path: 
 fn poll_agent(registry: &AgentRegistry, agent_id: &str) -> Option<String> {
     let reg = registry.lock().unwrap();
     for (id, slot) in reg.iter() {
-        if id == agent_id { return slot.lock().unwrap().clone(); }
+        if id == agent_id {
+            return slot.lock().unwrap().clone();
+        }
     }
     Some(format!("unknown agent_id: {agent_id}"))
 }
 
-fn run_tool(text: &str, traj: &str, evolve_mode: bool, registry: Option<(&AgentRegistry, &(String, String, String), &str)>) -> Option<String> {
+fn run_tool(
+    text: &str,
+    traj: &str,
+    evolve_mode: bool,
+    registry: Option<(&AgentRegistry, &(String, String, String), &str)>,
+) -> Option<String> {
     let (name, body) = extract_tool(text)?;
     match name {
         "bash" => {
-            let out = Command::new("sh").args(["-c", body]).output()
-                .map(|o| format!("exit={}\n{}{}", o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+            let out = Command::new("sh")
+                .args(["-c", body])
+                .output()
+                .map(|o| {
+                    format!(
+                        "exit={}\n{}{}",
+                        o.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&o.stdout),
+                        String::from_utf8_lossy(&o.stderr)
+                    )
+                })
                 .unwrap_or_else(|e| format!("error: {e}"));
             let out = out.chars().take(2000).collect::<String>();
             traj_log(traj, "tool_result", json!({"tool": "bash", "result": &out}));
@@ -226,12 +337,17 @@ fn run_tool(text: &str, traj: &str, evolve_mode: bool, registry: Option<(&AgentR
             let content = lines.next().unwrap_or("");
             if evolve_mode {
                 let allowed = (path.starts_with("src/") && !path.ends_with(".bak"))
-                    || path == "CLAUDE.md" || path == "README.md";
+                    || path == "CLAUDE.md"
+                    || path == "README.md";
                 if !allowed {
-                    return Some(format!("<tool_result>REJECTED (not an evolvable path: {path})</tool_result>"));
+                    return Some(format!(
+                        "<tool_result>REJECTED (not an evolvable path: {path})</tool_result>"
+                    ));
                 }
             }
-            if let Some(parent) = Path::new(path).parent() { fs::create_dir_all(parent).ok(); }
+            if let Some(parent) = Path::new(path).parent() {
+                fs::create_dir_all(parent).ok();
+            }
             let final_content: String = if let Some((start, end)) = range {
                 let existing = fs::read_to_string(path).unwrap_or_default();
                 let chars: Vec<char> = existing.chars().collect();
@@ -244,24 +360,46 @@ fn run_tool(text: &str, traj: &str, evolve_mode: bool, registry: Option<(&AgentR
                 content.to_string()
             };
             if path == SELF_PATH {
-                if final_content.is_empty() { return Some("<tool_result>REJECTED (empty content)</tool_result>".to_string()); }
+                if final_content.is_empty() {
+                    return Some("<tool_result>REJECTED (empty content)</tool_result>".to_string());
+                }
                 let saved = fs::read_to_string(SELF_PATH).unwrap_or_default();
                 fs::write(SELF_PATH, &final_content).ok();
-                let build = Command::new("cargo").args(["build", "--release"]).output()
-                    .map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+                let build = Command::new("cargo")
+                    .args(["build", "--release"])
+                    .output()
+                    .map(|o| {
+                        format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&o.stdout),
+                            String::from_utf8_lossy(&o.stderr)
+                        )
+                    })
                     .unwrap_or_else(|e| e.to_string());
                 if build.contains("error[") || build.contains("error: ") {
                     fs::write(SELF_PATH, &saved).ok();
                     let snippet = build.chars().take(400).collect::<String>();
                     let result = format!("REJECTED (build failed, reverted):\n{snippet}");
-                    traj_log(traj, "tool_result", json!({"tool": "write_file", "path": path, "result": &result}));
+                    traj_log(
+                        traj,
+                        "tool_result",
+                        json!({"tool": "write_file", "path": path, "result": &result}),
+                    );
                     return Some(format!("<tool_result>{result}</tool_result>"));
                 }
-                traj_log(traj, "tool_result", json!({"tool": "write_file", "path": path, "result": "written and verified OK"}));
+                traj_log(
+                    traj,
+                    "tool_result",
+                    json!({"tool": "write_file", "path": path, "result": "written and verified OK"}),
+                );
                 Some("<tool_result>written and verified OK</tool_result>".to_string())
             } else {
                 fs::write(path, &final_content).ok();
-                traj_log(traj, "tool_result", json!({"tool": "write_file", "path": path}));
+                traj_log(
+                    traj,
+                    "tool_result",
+                    json!({"tool": "write_file", "path": path}),
+                );
                 Some(format!("<tool_result>written {path}</tool_result>"))
             }
         }
@@ -275,11 +413,26 @@ fn run_tool(text: &str, traj: &str, evolve_mode: bool, registry: Option<(&AgentR
                     let start = start.min(total);
                     let end = end.min(total).max(start);
                     let out: String = content.chars().skip(start).take(end - start).collect();
-                    let more = if end < total { format!("\n[{} chars remaining — use read_file {path} {}..{}]", total - end, end, (end + 16000).min(total)) } else { String::new() };
-                    traj_log(traj, "tool_result", json!({"tool": "read_file", "path": path, "range": format!("{start}..{end}")}));
+                    let more = if end < total {
+                        format!(
+                            "\n[{} chars remaining — use read_file {path} {}..{}]",
+                            total - end,
+                            end,
+                            (end + 16000).min(total)
+                        )
+                    } else {
+                        String::new()
+                    };
+                    traj_log(
+                        traj,
+                        "tool_result",
+                        json!({"tool": "read_file", "path": path, "range": format!("{start}..{end}")}),
+                    );
                     Some(format!("<tool_result>{out}{more}</tool_result>"))
                 }
-                Err(e) => Some(format!("<tool_result>ERROR reading {path}: {e}</tool_result>")),
+                Err(e) => Some(format!(
+                    "<tool_result>ERROR reading {path}: {e}</tool_result>"
+                )),
             }
         }
         "spawn_agent" => {
@@ -289,7 +442,11 @@ fn run_tool(text: &str, traj: &str, evolve_mode: bool, registry: Option<(&AgentR
             let task = ls.next().unwrap_or(body).trim();
             let out_path = format!("{out_dir}/{rel}");
             let agent_id = spawn_sub_agent(cfg_snap.clone(), task, &out_path, traj, reg);
-            traj_log(traj, "tool_result", json!({"tool": "spawn_agent", "agent_id": &agent_id}));
+            traj_log(
+                traj,
+                "tool_result",
+                json!({"tool": "spawn_agent", "agent_id": &agent_id}),
+            );
             Some(format!("<tool_result>spawned {agent_id} → {out_path}\nUse <tool name=\"wait_agent\">{agent_id}</tool> to block.</tool_result>"))
         }
         "wait_agent" => {
@@ -297,8 +454,14 @@ fn run_tool(text: &str, traj: &str, evolve_mode: bool, registry: Option<(&AgentR
             let agent_id = body.trim();
             loop {
                 if let Some(result) = poll_agent(reg, agent_id) {
-                    traj_log(traj, "tool_result", json!({"tool": "wait_agent", "agent_id": agent_id, "result": &result}));
-                    return Some(format!("<tool_result>agent {agent_id} finished: {result}</tool_result>"));
+                    traj_log(
+                        traj,
+                        "tool_result",
+                        json!({"tool": "wait_agent", "agent_id": agent_id, "result": &result}),
+                    );
+                    return Some(format!(
+                        "<tool_result>agent {agent_id} finished: {result}</tool_result>"
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
@@ -316,7 +479,9 @@ fn chat_mode(cfg: &Cfg, session_ts: &str, traj: &str) {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
             match line {
-                Ok(l) => { q2.lock().unwrap().push_back(l); }
+                Ok(l) => {
+                    q2.lock().unwrap().push_back(l);
+                }
                 Err(_) => break,
             }
         }
@@ -342,7 +507,9 @@ fn chat_mode(cfg: &Cfg, session_ts: &str, traj: &str) {
     loop {
         let input = loop {
             let mut q = queue.lock().unwrap();
-            if let Some(line) = q.pop_front() { break line; }
+            if let Some(line) = q.pop_front() {
+                break line;
+            }
             drop(q);
             if Arc::strong_count(&queue) == 1 {
                 traj_log(traj, "session_end", json!({"turns": task_n}));
@@ -352,18 +519,29 @@ fn chat_mode(cfg: &Cfg, session_ts: &str, traj: &str) {
         };
 
         let trimmed = input.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
 
         if trimmed == "/exit" {
-            traj_log(traj, "session_end", json!({"turns": task_n, "reason": "user /exit"}));
+            traj_log(
+                traj,
+                "session_end",
+                json!({"turns": task_n, "reason": "user /exit"}),
+            );
             eprintln!("Bye.");
             std::process::exit(0);
         }
         if trimmed == "/evolve" {
-            traj_log(traj, "session_end", json!({"turns": task_n, "reason": "user /evolve"}));
+            traj_log(
+                traj,
+                "session_end",
+                json!({"turns": task_n, "reason": "user /evolve"}),
+            );
             eprintln!("Starting evolution loop...");
             evolve_mode(cfg, traj);
-            let exe = env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("./target/release/auto-harness"));
+            let exe = env::current_exe()
+                .unwrap_or_else(|_| std::path::PathBuf::from("./target/release/auto-harness"));
             eprintln!("Evolution done. Relaunching {}...\n", exe.display());
             let err = Command::new(&exe).args(env::args().skip(1)).exec();
             eprintln!("re-exec failed: {err}");
@@ -380,24 +558,73 @@ fn chat_mode(cfg: &Cfg, session_ts: &str, traj: &str) {
         }
 
         let stamped = format!("[output_dir: {out_dir}]\n{input}");
-        messages.push(Msg { role: "user".to_string(), content: json!(stamped) });
-        if messages.len() > 20 { messages.drain(..messages.len() - 20); }
+        messages.push(Msg {
+            role: "user".to_string(),
+            content: json!(stamped),
+        });
+        if messages.len() > 20 {
+            messages.drain(..messages.len() - 20);
+        }
 
         let mut turn = 0usize;
         loop {
             turn += 1;
             let reply = match llm(cfg, &messages, &system) {
                 Ok(r) => r,
-                Err(e) => { eprintln!("LLM error: {e}"); break; }
+                Err(e) => {
+                    eprintln!("LLM error: {e}");
+                    break;
+                }
             };
-            traj_log(traj, "llm_response", json!({"task": task_n, "turn": turn, "preview": &reply.chars().take(200).collect::<String>()}));
+            traj_log(
+                traj,
+                "llm_response",
+                json!({"task": task_n, "turn": turn, "preview": &reply.chars().take(200).collect::<String>()}),
+            );
             println!("{reply}");
-            messages.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
-            if messages.len() > 20 { messages.drain(..messages.len() - 20); }
-            if let Some(tool_result) = run_tool(&reply, traj, false, Some((&registry, &cfg_snap, &out_dir))) {
-                messages.push(Msg { role: "user".to_string(), content: json!(tool_result) });
+            messages.push(Msg {
+                role: "assistant".to_string(),
+                content: json!(&reply),
+            });
+            if messages.len() > 20 {
+                messages.drain(..messages.len() - 20);
+            }
+            if let Some(tool_result) =
+                run_tool(&reply, traj, false, Some((&registry, &cfg_snap, &out_dir)))
+            {
+                messages.push(Msg {
+                    role: "user".to_string(),
+                    content: json!(tool_result),
+                });
             } else {
-                break;
+                match goal_materialized(cfg, &messages, &input) {
+                    Ok(true) => {
+                        traj_log(traj, "goal_complete", json!({"task": task_n, "turn": turn}));
+                        break;
+                    }
+                    Ok(false) => {
+                        let continue_prompt = format!(
+                            "Ralph loop continuation: the original user goal has not been fully materialized yet.\n\nOriginal user goal:\n{input}\n\nContinue working toward that goal. Use tools if needed. Only stop when the goal is fully materialized or you are concretely blocked."
+                        );
+                        traj_log(traj, "goal_continue", json!({"task": task_n, "turn": turn}));
+                        messages.push(Msg {
+                            role: "user".to_string(),
+                            content: json!(continue_prompt),
+                        });
+                        if messages.len() > 20 {
+                            messages.drain(..messages.len() - 20);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Goal-judge error: {e}");
+                        traj_log(
+                            traj,
+                            "goal_judge_error",
+                            json!({"task": task_n, "turn": turn, "error": e}),
+                        );
+                        break;
+                    }
+                }
             }
         }
     }
@@ -405,14 +632,22 @@ fn chat_mode(cfg: &Cfg, session_ts: &str, traj: &str) {
 
 fn reflect(cfg: &Cfg, traj: &str) {
     let watermark: u64 = fs::read_to_string(WATERMARK_PATH)
-        .ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
 
-    let sessions: Vec<_> = fs::read_dir(".evo/sessions").into_iter().flatten().flatten()
+    let sessions: Vec<_> = fs::read_dir(".evo/sessions")
+        .into_iter()
+        .flatten()
+        .flatten()
         .filter(|e| {
             let s = e.file_name();
             let s = s.to_string_lossy();
-            s.ends_with(".jsonl") &&
-            s.trim_end_matches(".jsonl").parse::<u64>().map(|ts| ts > watermark).unwrap_or(false)
+            s.ends_with(".jsonl")
+                && s.trim_end_matches(".jsonl")
+                    .parse::<u64>()
+                    .map(|ts| ts > watermark)
+                    .unwrap_or(false)
         })
         .collect();
 
@@ -425,12 +660,17 @@ fn reflect(cfg: &Cfg, traj: &str) {
 
     for entry in &sessions {
         let name = entry.file_name();
-        let session_ts: u64 = name.to_string_lossy().trim_end_matches(".jsonl").parse().unwrap_or(0);
+        let session_ts: u64 = name
+            .to_string_lossy()
+            .trim_end_matches(".jsonl")
+            .parse()
+            .unwrap_or(0);
         let traj_path = entry.path().to_string_lossy().to_string();
 
         let summary: String = {
             let raw = fs::read_to_string(&traj_path).unwrap_or_default();
-            let joined = raw.lines()
+            let joined = raw
+                .lines()
                 .filter_map(|l| {
                     let mut v: Value = serde_json::from_str(l).ok()?;
                     if let Some(obj) = v.get_mut("data") {
@@ -438,14 +678,23 @@ fn reflect(cfg: &Cfg, traj: &str) {
                             map.remove("content");
                             map.remove("preview");
                         } else if obj.as_str().map(|s| s.len()).unwrap_or(0) > 120 {
-                            *obj = json!(obj.as_str().unwrap_or("").chars().take(120).collect::<String>());
+                            *obj = json!(obj
+                                .as_str()
+                                .unwrap_or("")
+                                .chars()
+                                .take(120)
+                                .collect::<String>());
                         }
                     }
                     Some(v.to_string())
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            if joined.len() > 8000 { joined[joined.len() - 8000..].to_string() } else { joined }
+            if joined.len() > 8000 {
+                joined[joined.len() - 8000..].to_string()
+            } else {
+                joined
+            }
         };
 
         let mut msgs = vec![Msg {
@@ -459,7 +708,10 @@ fn reflect(cfg: &Cfg, traj: &str) {
         loop {
             match llm(cfg, &msgs, &system) {
                 Ok(reply) => {
-                    msgs.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
+                    msgs.push(Msg {
+                        role: "assistant".to_string(),
+                        content: json!(&reply),
+                    });
                     if let Some(("read_file", raw_body)) = extract_tool(&reply) {
                         let (path, range) = parse_path_range(raw_body.trim());
                         let content = match fs::read_to_string(path.trim()) {
@@ -470,18 +722,31 @@ fn reflect(cfg: &Cfg, traj: &str) {
                                 let end = end.min(total).max(start);
                                 let out: String = c.chars().skip(start).take(end - start).collect();
                                 if end < total {
-                                    format!("{out}\n[{} chars remaining — use read_file {path} {}..{}]", total - end, end, (end + 16000).min(total))
-                                } else { out }
+                                    format!(
+                                        "{out}\n[{} chars remaining — use read_file {path} {}..{}]",
+                                        total - end,
+                                        end,
+                                        (end + 16000).min(total)
+                                    )
+                                } else {
+                                    out
+                                }
                             }
                             Err(e) => format!("ERROR: {e}"),
                         };
-                        msgs.push(Msg { role: "user".to_string(), content: json!(format!("<tool_result>{content}</tool_result>")) });
+                        msgs.push(Msg {
+                            role: "user".to_string(),
+                            content: json!(format!("<tool_result>{content}</tool_result>")),
+                        });
                     } else {
                         suggestion = reply;
                         break;
                     }
                 }
-                Err(e) => { eprintln!("Reflection LLM error [{session_ts}]: {e}"); break; }
+                Err(e) => {
+                    eprintln!("Reflection LLM error [{session_ts}]: {e}");
+                    break;
+                }
             }
         }
 
@@ -495,7 +760,11 @@ fn reflect(cfg: &Cfg, traj: &str) {
 }
 
 fn append_memo(memo_path: &str, entry: &str) {
-    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(memo_path) {
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(memo_path)
+    {
         let _ = writeln!(f, "{entry}");
     }
 }
@@ -516,14 +785,25 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
         let src = fs::read_to_string(SELF_PATH).unwrap_or_default();
         let agents_md = fs::read_to_string("src/AGENTS.md").unwrap_or_default();
         let prompts_section = {
-            let names = ["chat_system.txt", "reflect_system.txt", "evolve_system.txt", "doc_system.txt"];
-            names.iter().map(|n| {
-                let content = fs::read_to_string(format!("src/prompts/{n}")).unwrap_or_default();
-                format!("=== src/prompts/{n} ===\n{content}")
-            }).collect::<Vec<_>>().join("\n\n")
+            let names = [
+                "chat_system.txt",
+                "reflect_system.txt",
+                "evolve_system.txt",
+                "doc_system.txt",
+            ];
+            names
+                .iter()
+                .map(|n| {
+                    let content =
+                        fs::read_to_string(format!("src/prompts/{n}")).unwrap_or_default();
+                    format!("=== src/prompts/{n} ===\n{content}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
         };
         let memory_section = memory_index();
-        let changelog = fs::read_to_string(&memo_path).unwrap_or_else(|_| "(none yet this run)".to_string());
+        let changelog =
+            fs::read_to_string(&memo_path).unwrap_or_else(|_| "(none yet this run)".to_string());
         let mut messages: Vec<Msg> = vec![Msg {
             role: "user".to_string(),
             content: json!(format!(
@@ -539,39 +819,73 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
             turn += 1;
             let reply = match llm(cfg, &messages, &evolve_system) {
                 Ok(r) => r,
-                Err(e) => { eprintln!("LLM error: {e}"); break; }
+                Err(e) => {
+                    eprintln!("LLM error: {e}");
+                    break;
+                }
             };
-            traj_log(traj, "llm_response", json!({"iter": iter_n, "turn": turn, "preview": &reply.chars().take(200).collect::<String>()}));
+            traj_log(
+                traj,
+                "llm_response",
+                json!({"iter": iter_n, "turn": turn, "preview": &reply.chars().take(200).collect::<String>()}),
+            );
 
             if reply.trim().to_uppercase().starts_with("SKIP") {
-                traj_log(traj, "iter_skip", json!({"iter": iter_n, "reason": "LLM chose not to evolve"}));
+                traj_log(
+                    traj,
+                    "iter_skip",
+                    json!({"iter": iter_n, "reason": "LLM chose not to evolve"}),
+                );
                 eprintln!("Iter {iter_n}: SKIP — evolution complete.");
                 done = true;
                 break;
             }
 
             if change_summary.is_empty() {
-                change_summary = reply.lines().next().unwrap_or("").chars().take(200).collect();
+                change_summary = reply
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect();
             }
 
-            messages.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
+            messages.push(Msg {
+                role: "assistant".to_string(),
+                content: json!(&reply),
+            });
 
             if let Some(tool_result) = run_tool(&reply, traj, true, None) {
-                let write_ok = tool_result.contains("verified OK") || tool_result.contains("written ");
-                if write_ok { improved = true; }
-                messages.push(Msg { role: "user".to_string(), content: json!(tool_result) });
-                if write_ok { break; }
+                let write_ok =
+                    tool_result.contains("verified OK") || tool_result.contains("written ");
+                if write_ok {
+                    improved = true;
+                }
+                messages.push(Msg {
+                    role: "user".to_string(),
+                    content: json!(tool_result),
+                });
+                if write_ok {
+                    break;
+                }
             } else {
                 break;
             }
         }
 
-        traj_log(traj, "iter_end", json!({"iter": iter_n, "improved": improved}));
+        traj_log(
+            traj,
+            "iter_end",
+            json!({"iter": iter_n, "improved": improved}),
+        );
         if improved {
             append_memo(&memo_path, &format!("- iter {iter_n}: {change_summary}"));
             eprintln!("Iter {iter_n}: improved.");
         }
-        if done { break; }
+        if done {
+            break;
+        }
     }
 
     traj_log(traj, "evolve_end", json!({}));
@@ -579,13 +893,28 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
     // Refine: feed clippy+test failures to LLM for fixes before final verification
     eprintln!("Refine: running lint and tests...");
     let run_clippy = || -> (bool, String) {
-        match Command::new("cargo").args(["clippy", "--release", "--no-deps", "--", "-D", "warnings"]).output() {
+        match Command::new("cargo")
+            .args(["clippy", "--release", "--no-deps", "--", "-D", "warnings"])
+            .output()
+        {
             Ok(o) => {
-                let combined = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
-                let relevant: String = combined.lines()
-                    .filter(|l| l.contains("warning") || l.contains("error") || l.starts_with("error"))
-                    .collect::<Vec<_>>().join("\n");
-                let out = if relevant.is_empty() { combined } else { relevant };
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                let relevant: String = combined
+                    .lines()
+                    .filter(|l| {
+                        l.contains("warning") || l.contains("error") || l.starts_with("error")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let out = if relevant.is_empty() {
+                    combined
+                } else {
+                    relevant
+                };
                 (o.status.success(), out.chars().take(2000).collect())
             }
             Err(e) => (false, e.to_string()),
@@ -594,8 +923,14 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
     let run_test = || -> (bool, String) {
         match Command::new("cargo").args(["test", "--release"]).output() {
             Ok(o) => {
-                let out = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
-                    .chars().take(2000).collect();
+                let out = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+                .chars()
+                .take(2000)
+                .collect();
                 (o.status.success(), out)
             }
             Err(e) => (false, e.to_string()),
@@ -610,17 +945,33 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
         let issues = format!(
             "Post-evolution check found issues. Fix them using write_file. Reply SKIP if nothing to fix.\n\nClippy (ok={clippy_ok}):\n{clippy_out}\n\nTests (ok={test_ok}):\n{test_out}"
         );
-        let mut refine_msgs = vec![Msg { role: "user".to_string(), content: json!(issues) }];
+        let mut refine_msgs = vec![Msg {
+            role: "user".to_string(),
+            content: json!(issues),
+        }];
         loop {
             match llm(cfg, &refine_msgs, &evolve_system) {
                 Ok(reply) => {
-                    refine_msgs.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
-                    if reply.trim().to_uppercase().starts_with("SKIP") { break; }
+                    refine_msgs.push(Msg {
+                        role: "assistant".to_string(),
+                        content: json!(&reply),
+                    });
+                    if reply.trim().to_uppercase().starts_with("SKIP") {
+                        break;
+                    }
                     if let Some(result) = run_tool(&reply, traj, true, None) {
-                        refine_msgs.push(Msg { role: "user".to_string(), content: json!(result) });
-                    } else { break; }
+                        refine_msgs.push(Msg {
+                            role: "user".to_string(),
+                            content: json!(result),
+                        });
+                    } else {
+                        break;
+                    }
                 }
-                Err(e) => { eprintln!("Refine LLM error: {e}"); break; }
+                Err(e) => {
+                    eprintln!("Refine LLM error: {e}");
+                    break;
+                }
             }
         }
     }
@@ -629,10 +980,26 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
     eprintln!("Running final lint and tests...");
     let (clippy_ok, clippy_out) = run_clippy();
     let (test_ok, test_out) = run_test();
-    traj_log(traj, "lint_result", json!({"ok": clippy_ok, "output": &clippy_out}));
-    traj_log(traj, "test_result", json!({"ok": test_ok, "output": &test_out}));
-    if clippy_ok { eprintln!("Lint: PASS"); } else { eprintln!("Lint: FAIL\n{clippy_out}"); }
-    if test_ok { eprintln!("Tests: PASS"); } else { eprintln!("Tests: FAIL\n{test_out}"); }
+    traj_log(
+        traj,
+        "lint_result",
+        json!({"ok": clippy_ok, "output": &clippy_out}),
+    );
+    traj_log(
+        traj,
+        "test_result",
+        json!({"ok": test_ok, "output": &test_out}),
+    );
+    if clippy_ok {
+        eprintln!("Lint: PASS");
+    } else {
+        eprintln!("Lint: FAIL\n{clippy_out}");
+    }
+    if test_ok {
+        eprintln!("Tests: PASS");
+    } else {
+        eprintln!("Tests: FAIL\n{test_out}");
+    }
     if !clippy_ok || !test_ok {
         eprintln!("WARNING: evolved binary still has lint/test failures after refine.");
     }
@@ -646,18 +1013,30 @@ fn evolve_mode(cfg: &Cfg, traj: &str) {
     let doc_prompt = format!(
         "Current src/main.rs:\n```rust\n{src}\n```\n\nCurrent CLAUDE.md:\n{claude_md}\n\nCurrent README.md:\n{readme}\n\nUpdate both docs to match the implementation."
     );
-    let mut doc_msgs = vec![Msg { role: "user".to_string(), content: json!(doc_prompt) }];
+    let mut doc_msgs = vec![Msg {
+        role: "user".to_string(),
+        content: json!(doc_prompt),
+    }];
     loop {
         match llm(cfg, &doc_msgs, &doc_system) {
             Ok(reply) => {
-                doc_msgs.push(Msg { role: "assistant".to_string(), content: json!(&reply) });
+                doc_msgs.push(Msg {
+                    role: "assistant".to_string(),
+                    content: json!(&reply),
+                });
                 if let Some(result) = run_tool(&reply, traj, true, None) {
-                    doc_msgs.push(Msg { role: "user".to_string(), content: json!(result) });
+                    doc_msgs.push(Msg {
+                        role: "user".to_string(),
+                        content: json!(result),
+                    });
                 } else {
                     break;
                 }
             }
-            Err(e) => { eprintln!("Doc update LLM error: {e}"); break; }
+            Err(e) => {
+                eprintln!("Doc update LLM error: {e}");
+                break;
+            }
         }
     }
 
@@ -732,13 +1111,19 @@ mod tests {
         let registry: AgentRegistry = Arc::new(Mutex::new(vec![]));
         let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let slot2 = slot.clone();
-        registry.lock().unwrap().push(("agent_test".to_string(), slot));
+        registry
+            .lock()
+            .unwrap()
+            .push(("agent_test".to_string(), slot));
 
         assert!(poll_agent(&registry, "agent_test").is_none());
 
         *slot2.lock().unwrap() = Some("written output.md".to_string());
 
-        assert_eq!(poll_agent(&registry, "agent_test"), Some("written output.md".to_string()));
+        assert_eq!(
+            poll_agent(&registry, "agent_test"),
+            Some("written output.md".to_string())
+        );
     }
 
     #[test]
@@ -752,7 +1137,10 @@ mod tests {
         let registry: AgentRegistry = Arc::new(Mutex::new(vec![]));
         let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let slot2 = slot.clone();
-        registry.lock().unwrap().push(("agent_sim".to_string(), slot));
+        registry
+            .lock()
+            .unwrap()
+            .push(("agent_sim".to_string(), slot));
         *slot2.lock().unwrap() = Some(format!("written {}", output_path.display()));
 
         let result = poll_agent(&registry, "agent_sim").unwrap();
@@ -795,18 +1183,33 @@ mod tests {
             "test-model".to_string(),
         );
 
-        let spawn_text = "<tool name=\"spawn_agent\">sub_out.md\nWrite the word DONE to the output file.</tool>";
-        let result = run_tool(spawn_text, &traj, false, Some((&registry, &cfg_snap, &out_dir)));
+        let spawn_text =
+            "<tool name=\"spawn_agent\">sub_out.md\nWrite the word DONE to the output file.</tool>";
+        let result = run_tool(
+            spawn_text,
+            &traj,
+            false,
+            Some((&registry, &cfg_snap, &out_dir)),
+        );
         let result_str = result.unwrap();
         assert!(result_str.contains("spawned agent_"), "got: {result_str}");
 
         let agent_id = result_str
-            .split("spawned ").nth(1).unwrap()
-            .split_whitespace().next().unwrap()
+            .split("spawned ")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
             .to_string();
 
         let wait_text = format!("<tool name=\"wait_agent\">{agent_id}</tool>");
-        let wait_result = run_tool(&wait_text, &traj, false, Some((&registry, &cfg_snap, &out_dir)));
+        let wait_result = run_tool(
+            &wait_text,
+            &traj,
+            false,
+            Some((&registry, &cfg_snap, &out_dir)),
+        );
         let wait_str = wait_result.unwrap();
         assert!(wait_str.contains("finished:"), "got: {wait_str}");
 
