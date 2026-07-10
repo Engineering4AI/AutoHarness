@@ -61,7 +61,7 @@ flowchart TD
     C -->|/exit| Z[clean shutdown]
     C -->|user message| E[LLM: chat + tools]
     E --> C
-    C -->|/evolve| D[reflect → evolve → refine → lint/test → doc update]
+    C -->|/evolve| D[reflect → evolve<br/>refine → lint/test<br/>doc update]
     D --> R[exec evolved binary]
 ```
 
